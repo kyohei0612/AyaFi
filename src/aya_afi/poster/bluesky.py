@@ -166,13 +166,30 @@ class BlueskyPoster:
 
 
 def _translate_error(e: BaseException) -> Exception:
-    """Best-effort mapping of atproto exceptions to ``PosterError`` types."""
+    """Best-effort mapping of atproto exceptions to ``PosterError`` types.
+
+    Order matters: atproto responses always include ``ratelimit-*`` headers
+    in the stringified error, even on auth failures. Checking for explicit
+    auth signals (``AuthenticationRequired``, ``Invalid identifier``, ``401``,
+    ``login failed``) first prevents an auth failure from being misclassified
+    as a transient rate limit.
+    """
     message = str(e)
     lowered = message.lower()
-    if "rate" in lowered and "limit" in lowered:
-        return PosterRateLimitError(message)
-    if "auth" in lowered or "credential" in lowered or "401" in lowered:
+    auth_signals = (
+        "authenticationrequired",
+        "invalid identifier",
+        "invalid password",
+        "401",
+        "login failed",
+        "credential",
+    )
+    if any(s in lowered for s in auth_signals):
         return PosterAuthError(message)
+    # Use 429 or the explicit "rate limit exceeded" phrase; avoid matching on
+    # headers like "ratelimit-remaining" that appear in every response.
+    if "429" in lowered or "rate limit exceeded" in lowered or "ratelimitexceeded" in lowered:
+        return PosterRateLimitError(message)
     return PosterAPIError(message)
 
 

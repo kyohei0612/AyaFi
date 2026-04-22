@@ -60,25 +60,61 @@ async def test_successful_upload_returns_url(
     assert "catbox.moe" in str(captured[0].url)
 
 
-async def test_non_url_response_is_api_error(
+async def test_non_url_response_falls_back_and_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     img = tmp_path / "photo.jpg"
     img.write_bytes(b"\xff\xd8\xff\xe0")
 
-    _install_mock(monkeypatch, [httpx.Response(200, text="ERROR: too big")])
+    # Both providers return a non-URL — all-hosts-failed error.
+    _install_mock(
+        monkeypatch,
+        [
+            httpx.Response(200, text="ERROR: catbox rejected"),
+            httpx.Response(200, text="ERROR: 0x0 rejected"),
+        ],
+    )
 
-    with pytest.raises(PosterAPIError, match="unexpected payload"):
+    with pytest.raises(PosterAPIError, match="全画像ホスト失敗"):
         await image_host.upload_image(str(img))
 
 
-async def test_http_error_is_api_error(
+async def test_http_error_falls_back_and_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     img = tmp_path / "photo.jpg"
     img.write_bytes(b"\xff\xd8\xff\xe0")
 
-    _install_mock(monkeypatch, [httpx.Response(503, text="catbox down")])
+    _install_mock(
+        monkeypatch,
+        [
+            httpx.Response(503, text="catbox down"),
+            httpx.Response(503, text="0x0 down"),
+        ],
+    )
 
-    with pytest.raises(PosterAPIError, match="503"):
+    with pytest.raises(PosterAPIError, match="全画像ホスト失敗"):
         await image_host.upload_image(str(img))
+
+
+async def test_catbox_down_falls_back_to_nullpointer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    img = tmp_path / "photo.jpg"
+    img.write_bytes(b"\xff\xd8\xff\xe0")
+
+    captured = _install_mock(
+        monkeypatch,
+        [
+            # Primary (catbox) returns the current real-world failure shape.
+            httpx.Response(412, text="Uploads paused until storage resolved"),
+            # Fallback (0x0.st) succeeds.
+            httpx.Response(200, text="https://0x0.st/abc.jpg\n"),
+        ],
+    )
+
+    url = await image_host.upload_image(str(img))
+    assert url == "https://0x0.st/abc.jpg"
+    assert len(captured) == 2
+    assert "catbox.moe" in str(captured[0].url)
+    assert "0x0.st" in str(captured[1].url)
