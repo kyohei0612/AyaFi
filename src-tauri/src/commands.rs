@@ -115,7 +115,7 @@ pub async fn publish_post(
         params["reply_body"] = Value::String(r);
     }
     sidecar
-        .send_request("publish_post", params, 30.0)
+        .send_request("publish_post", params, 180.0)
         .await
         .map_err(|e| e.to_string())
 }
