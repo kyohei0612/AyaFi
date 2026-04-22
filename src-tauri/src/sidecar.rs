@@ -218,9 +218,14 @@ fn resolve_paths() -> Result<SidecarLaunch> {
         .parent()
         .ok_or_else(|| anyhow!("cannot derive parent of {}", exe.display()))?;
 
-    // Release / bundled layout. Tauri's bundler places declared resources
-    // under a `resources/` subdir next to the installed exe on Windows.
+    // Release / bundled layout. Tauri v2's NSIS bundler copies declared
+    // `bundle.resources` preserving their relative path next to the main
+    // exe — so `bin/sidecar.exe` ends up at `{install}/bin/sidecar.exe`.
+    // We also tolerate legacy layouts where the binary lands in the exe
+    // root or under a `resources/` subdir (older Tauri versions / manual
+    // packaging).
     for candidate in [
+        exe_dir.join("bin").join("sidecar.exe"),
         exe_dir.join("sidecar.exe"),
         exe_dir.join("resources").join("bin").join("sidecar.exe"),
         exe_dir.join("resources").join("sidecar.exe"),

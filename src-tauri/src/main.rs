@@ -9,11 +9,27 @@ fn main() {
     logging::init();
     tracing::info!(event = "tauri_startup", "starting aya-afi shell");
 
-    // Spawn Python sidecar before Tauri boots. If this fails we have no core
-    // functionality, so surface the error immediately (Stage 1 design; Stage 3
-    // will add auto-restart + degraded UI per ADR-010).
-    let sidecar = tauri::async_runtime::block_on(sidecar::Sidecar::spawn())
-        .expect("failed to spawn Python sidecar");
+    // Spawn Python sidecar before Tauri boots. On failure we log the full
+    // error AND surface a native message box, then exit — silent panics on
+    // release builds (windows_subsystem="windows") leave the user with a
+    // window that never appears and no explanation.
+    let sidecar = match tauri::async_runtime::block_on(sidecar::Sidecar::spawn()) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(event = "sidecar_spawn_failed", error = %e);
+            let msg = format!(
+                "AyaFi のサイドカー (Python バックエンド) を起動できませんでした。\n\n{e}\n\n\
+                 ログ: %APPDATA%\\AyaFi\\logs\\ で詳細確認してください。"
+            );
+            let _ = native_dialog::DialogBuilder::message()
+                .set_level(native_dialog::MessageLevel::Error)
+                .set_title("AyaFi 起動エラー")
+                .set_text(&msg)
+                .alert()
+                .show();
+            std::process::exit(1);
+        }
+    };
 
     tauri::Builder::default()
         .manage(sidecar)
