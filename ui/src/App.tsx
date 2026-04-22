@@ -344,11 +344,26 @@ export default function App(): JSX.Element {
   };
 
   const handlePublish = async (): Promise<void> => {
-    if (sns !== "bluesky") return;
-    const ok = window.confirm(
-      `Bluesky に投稿します。内容を確認してください。\n\n${editedText}\n\n---\n${charCount} / ${charLimit} 字`,
-    );
+    // Threads affiliate mode: put the URL in a self-reply per ADR-012.
+    const wantsReply =
+      sns === "threads" && mode === "affiliate" && product !== null;
+    const replyBody = wantsReply
+      ? `詳細はこちら👇\n${product!.affiliate_url}`
+      : undefined;
+
+    const snsLabel = SNS_LABELS[sns].short;
+    const previewLines = [
+      `${snsLabel} に投稿します。内容を確認してください。`,
+      "",
+      editedText,
+    ];
+    if (replyBody) {
+      previewLines.push("", "--- リプライ (アフィ URL) ---", replyBody);
+    }
+    previewLines.push("", `${charCount} / ${charLimit} 字`);
+    const ok = window.confirm(previewLines.join("\n"));
     if (!ok) return;
+
     try {
       setError("");
       setPublishResult(null);
@@ -356,6 +371,7 @@ export default function App(): JSX.Element {
       const resp = await invoke<SidecarResponse<PublishData>>("publish_post", {
         sns,
         body: editedText,
+        replyBody,
       });
       if (resp.ok && resp.data) {
         setPublishResult(resp.data);
@@ -733,7 +749,7 @@ export default function App(): JSX.Element {
               >
                 📝 note にコピー & 開く
               </button>
-              {sns === "bluesky" && (
+              {(sns === "bluesky" || sns === "threads") && (
                 <button
                   type="button"
                   className="btn-primary"
@@ -742,17 +758,21 @@ export default function App(): JSX.Element {
                     publishing ||
                     !editedText.trim() ||
                     overLimit ||
-                    (validation?.error_count ?? 0) > 0
+                    (validation?.error_count ?? 0) > 0 ||
+                    (sns === "threads" && mode === "affiliate" && !product)
                   }
-                  title="Bluesky に直接投稿します"
+                  title={
+                    sns === "threads" && mode === "affiliate"
+                      ? "Threads に投稿 (本文 → 自動でアフィ URL をリプ投稿)"
+                      : `${SNS_LABELS[sns].short} に直接投稿します`
+                  }
                 >
-                  {publishing ? "投稿中…" : "🦋 Bluesky に投稿"}
+                  {publishing
+                    ? "投稿中…"
+                    : sns === "bluesky"
+                      ? "🦋 Bluesky に投稿"
+                      : "🧵 Threads に投稿"}
                 </button>
-              )}
-              {sns === "threads" && (
-                <span className="hint-inline">
-                  Threads 直接投稿は Stage 3.a 待ち (現状は手動コピー運用)
-                </span>
               )}
               <button type="button" onClick={handleResetText}>
                 ↺ 元に戻す

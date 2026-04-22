@@ -1,27 +1,34 @@
-"""Threads (Meta Graph API) poster.
-
-Stage 1 scope (current): constructor + config validation + dry-run path.
-Real API calls land in **Stage 3.a**. Structure is locked in now so ADR-005's
-``post_targets`` state machine can depend on a stable ``publish`` contract.
+"""Threads (Meta Graph API) poster — real implementation (Stage 3.a).
 
 2-step posting design (ADR-012 §2):
-    1. Create parent-post media container (if images)
-    2. Create parent post (body only, NO URL)
-    3. Publish parent → obtain parent_id
-    4. If reply_body: create reply-post container referencing parent_id
-    5. Publish reply (affiliate URL lives here)
+    1. Create parent-post container (body only, NO URL)
+    2. Publish parent → parent_id
+    3. If reply_body: create reply container (reply_to_id=parent_id)
+    4. Publish reply (affiliate URL lives here)
+
+Text-only for now; image attachment lands in Stage 3.c.
 """
 
 from __future__ import annotations
 
 import logging
+from typing import Any
+
+import httpx
 
 from aya_afi.poster.base import PostRequest, PostResult
-from aya_afi.poster.errors import PosterConfigError
+from aya_afi.poster.errors import (
+    PosterAPIError,
+    PosterAuthError,
+    PosterConfigError,
+    PosterRateLimitError,
+    PosterValidationError,
+)
 
 _log = logging.getLogger("aya_afi.poster.threads")
 
 GRAPH_API_BASE = "https://graph.threads.net/v1.0"
+_REQUEST_TIMEOUT_SEC = 30.0
 
 
 class ThreadsPoster:
@@ -41,13 +48,76 @@ class ThreadsPoster:
     async def publish(self, req: PostRequest) -> PostResult:
         if req.dry_run:
             return self._dry_run_result(req)
-        # TODO Stage 3.a: implement 2-step posting
-        #   step1 = POST /{user_id}/threads (body + media_ids, no URL)
-        #   step2 = POST /{user_id}/threads_publish (returns parent_id)
-        #   step3 = POST /{user_id}/threads (reply_to_id=parent_id, reply_body w/ URL)
-        #   step4 = POST /{user_id}/threads_publish
-        # Use req.idempotency_key as client_token where supported.
-        raise NotImplementedError("Stage 3.a will implement the actual Threads Graph API flow.")
+
+        async with httpx.AsyncClient(timeout=_REQUEST_TIMEOUT_SEC) as client:
+            parent_id = await self._create_and_publish(client, req.body, reply_to_id=None)
+            reply_id: str | None = None
+            if req.reply_body:
+                reply_id = await self._create_and_publish(
+                    client, req.reply_body, reply_to_id=parent_id
+                )
+            permalink = await self._fetch_permalink(client, parent_id)
+
+        _log.info(
+            "threads_post_success",
+            extra={
+                "event": "threads_post_success",
+                "idempotency_key": req.idempotency_key,
+                "parent_id": parent_id,
+                "reply_id": reply_id,
+            },
+        )
+        return PostResult(
+            success=True,
+            sns=req.sns,
+            sns_post_id=parent_id,
+            sns_post_url=permalink,
+            reply_post_id=reply_id,
+        )
+
+    async def _create_and_publish(
+        self,
+        client: httpx.AsyncClient,
+        text: str,
+        reply_to_id: str | None,
+    ) -> str:
+        """Step 1+2 of the Threads posting flow. Returns the published post id."""
+        create_params: dict[str, str] = {
+            "media_type": "TEXT",
+            "text": text,
+            "access_token": self._access_token,
+        }
+        if reply_to_id is not None:
+            create_params["reply_to_id"] = reply_to_id
+
+        create_resp = await client.post(
+            f"{GRAPH_API_BASE}/{self._user_id}/threads",
+            params=create_params,
+        )
+        container_id = _parse_or_raise(create_resp, field="id", step="create_container")
+
+        publish_resp = await client.post(
+            f"{GRAPH_API_BASE}/{self._user_id}/threads_publish",
+            params={"creation_id": container_id, "access_token": self._access_token},
+        )
+        return _parse_or_raise(publish_resp, field="id", step="publish")
+
+    async def _fetch_permalink(self, client: httpx.AsyncClient, post_id: str) -> str | None:
+        """Best-effort: fetch the public permalink. Failure does NOT fail the post."""
+        try:
+            resp = await client.get(
+                f"{GRAPH_API_BASE}/{post_id}",
+                params={"fields": "permalink", "access_token": self._access_token},
+            )
+            if resp.status_code == 200:
+                permalink = resp.json().get("permalink")
+                return str(permalink) if permalink else None
+        except httpx.HTTPError as e:
+            _log.warning(
+                "threads_permalink_fetch_failed",
+                extra={"event": "threads_permalink_fetch_failed", "error": str(e)},
+            )
+        return None
 
     def _dry_run_result(self, req: PostRequest) -> PostResult:
         _log.info(
@@ -69,3 +139,54 @@ class ThreadsPoster:
             sns_post_url=f"https://www.threads.net/@user/post/{post_id}",
             reply_post_id=reply_id,
         )
+
+
+def _parse_or_raise(resp: httpx.Response, *, field: str, step: str) -> str:
+    """Extract ``field`` from a Threads API response, or raise the right PosterError."""
+    if resp.status_code == 200:
+        payload = resp.json()
+        if field not in payload:
+            raise PosterAPIError(
+                f"Threads {step} returned 200 but no '{field}' field: {payload}"
+            )
+        return str(payload[field])
+    raise _translate_error(resp, step=step)
+
+
+def _translate_error(resp: httpx.Response, *, step: str) -> Exception:
+    """Map a non-200 Threads response to the right PosterError subclass."""
+    status = resp.status_code
+    try:
+        body: dict[str, Any] = resp.json()
+    except ValueError:
+        body = {}
+    error = body.get("error", {}) if isinstance(body, dict) else {}
+    code = error.get("code")
+    subcode = error.get("error_subcode")
+    message = error.get("message") or resp.text
+    summary = f"Threads {step} failed ({status}, code={code}, sub={subcode}): {message}"
+
+    # Auth: invalid/expired token (Meta codes 190, 452, 459, 463).
+    if status == 401 or code in {190, 452, 459, 463, 467}:
+        return PosterAuthError(summary)
+    # Rate limit: 429 or Meta-specific codes 4, 17, 32, 613.
+    if status == 429 or code in {4, 17, 32, 613}:
+        retry_after = _extract_retry_after(resp)
+        return PosterRateLimitError(summary, retry_after_sec=retry_after)
+    # 5xx: transient/retryable.
+    if status >= 500:
+        return PosterAPIError(summary)
+    # Other 4xx: content rejected (policy/length/media).
+    if 400 <= status < 500:
+        return PosterValidationError(summary)
+    return PosterAPIError(summary)
+
+
+def _extract_retry_after(resp: httpx.Response) -> float | None:
+    raw = resp.headers.get("Retry-After")
+    if not raw:
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        return None
