@@ -7,7 +7,12 @@ import pytest
 
 from aya_afi.poster.base import PostRequest
 from aya_afi.poster.bluesky import BlueskyPoster, _build_rich_text
-from aya_afi.poster.errors import PosterAPIError, PosterAuthError, PosterConfigError
+from aya_afi.poster.errors import (
+    PosterAPIError,
+    PosterAuthError,
+    PosterConfigError,
+    PosterValidationError,
+)
 from aya_afi.sns_engine.base import SnsKind
 
 
@@ -148,6 +153,101 @@ def test_rich_text_japanese_hashtag() -> None:
     assert tb.calls[0] == ("tag", ("#節約生活", "節約生活"))
 
 
+async def test_too_many_images_rejected_as_validation_error(tmp_path: Any) -> None:
+    poster = BlueskyPoster(handle="aya.bsky.social", app_password="app-pw")
+    paths = []
+    for i in range(5):
+        p = tmp_path / f"img{i}.jpg"
+        p.write_bytes(b"\xff\xd8\xff\xe0")
+        paths.append(str(p))
+
+    fake_client = MagicMock()
+    fake_client.upload_blob.return_value = MagicMock(blob="BLOB")
+
+    with (
+        patch("atproto.Client", return_value=fake_client),
+        pytest.raises(PosterValidationError, match="4 枚まで"),
+    ):
+        await poster.publish(_req(image_paths=paths))
+
+
+async def test_missing_image_file_raises_validation(tmp_path: Any) -> None:
+    poster = BlueskyPoster(handle="aya.bsky.social", app_password="app-pw")
+    missing = str(tmp_path / "does-not-exist.jpg")
+
+    fake_client = MagicMock()
+
+    with (
+        patch("atproto.Client", return_value=fake_client),
+        pytest.raises(PosterValidationError, match="見つかりません"),
+    ):
+        await poster.publish(_req(image_paths=[missing]))
+
+
+async def test_oversized_image_raises_validation(tmp_path: Any) -> None:
+    poster = BlueskyPoster(handle="aya.bsky.social", app_password="app-pw")
+    too_big = tmp_path / "huge.jpg"
+    too_big.write_bytes(b"\x00" * (977 * 1024))  # > 976 KB
+
+    fake_client = MagicMock()
+
+    with (
+        patch("atproto.Client", return_value=fake_client),
+        pytest.raises(PosterValidationError, match="大きすぎます"),
+    ):
+        await poster.publish(_req(image_paths=[str(too_big)]))
+
+
+async def test_images_are_uploaded_and_embedded(tmp_path: Any) -> None:
+    poster = BlueskyPoster(handle="aya.bsky.social", app_password="app-pw")
+    path_a = tmp_path / "a.jpg"
+    path_a.write_bytes(b"AAAA")
+    path_b = tmp_path / "b.jpg"
+    path_b.write_bytes(b"BBBB")
+
+    fake_client = MagicMock()
+    fake_resp = MagicMock()
+    fake_resp.uri = "at://did:plc:abc/app.bsky.feed.post/R"
+    fake_client.send_post.return_value = fake_resp
+    fake_client.upload_blob.side_effect = [
+        MagicMock(blob="BLOB_A"),
+        MagicMock(blob="BLOB_B"),
+    ]
+
+    captured_embed: dict[str, Any] = {}
+
+    def capture(text: Any, embed: Any = None) -> Any:
+        captured_embed["embed"] = embed
+        return fake_resp
+
+    fake_client.send_post.side_effect = capture
+
+    class _FakeImage:
+        def __init__(self, alt: str, image: Any) -> None:
+            self.alt = alt
+            self.image = image
+
+    class _FakeMain:
+        def __init__(self, images: list[Any]) -> None:
+            self.images = images
+
+    fake_models = MagicMock()
+    fake_models.AppBskyEmbedImages.Image.side_effect = _FakeImage
+    fake_models.AppBskyEmbedImages.Main.side_effect = _FakeMain
+
+    with (
+        patch("atproto.Client", return_value=fake_client),
+        patch("atproto.models", fake_models),
+    ):
+        await poster.publish(_req(image_paths=[str(path_a), str(path_b)]))
+
+    assert fake_client.upload_blob.call_count == 2
+    fake_client.upload_blob.assert_any_call(b"AAAA")
+    fake_client.upload_blob.assert_any_call(b"BBBB")
+    embed = captured_embed["embed"]
+    assert [img.image for img in embed.images] == ["BLOB_A", "BLOB_B"]
+
+
 async def test_full_width_hash_is_normalized_before_tag_extraction() -> None:
     """`＃tag` (LLM output) should be routed as a proper hashtag facet."""
     poster = BlueskyPoster(handle="aya.bsky.social", app_password="app-pw")
@@ -166,7 +266,7 @@ async def test_full_width_hash_is_normalized_before_tag_extraction() -> None:
         def TextBuilder() -> _StubBuilder:  # noqa: N802
             return recorder
 
-    def capture(text: Any) -> Any:
+    def capture(text: Any, embed: Any = None) -> Any:
         captured["text"] = text
         return fake_resp
 

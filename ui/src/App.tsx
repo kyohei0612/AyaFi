@@ -13,7 +13,6 @@ function basename(path: string): string {
 }
 
 const MAX_IMAGES = 10;
-const MAX_IMAGE_SIZE_MB = 8;
 import {
   NGFlagId,
   NG_OPTIONS,
@@ -30,6 +29,31 @@ import {
 } from "./prompts";
 
 const NG_STORAGE_KEY = "aya-afi.ngFlags";
+const PROFILE_STORAGE_KEY = "aya-afi.profile";
+
+const PROFILE_PLACEHOLDER =
+  "例:\n" +
+  "- 30 代前半、都内在住\n" +
+  "- 夫婦 2 人暮らし、子どもなし (将来も予定なし)\n" +
+  "- フルタイムで事務職、通勤 1 時間\n" +
+  "- 週末は夫と喫茶店めぐり、ミニマリスト志向\n" +
+  "- 猫を飼っている (キジトラ、7 歳)";
+
+function loadProfile(): string {
+  try {
+    return localStorage.getItem(PROFILE_STORAGE_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function saveProfile(value: string): void {
+  try {
+    localStorage.setItem(PROFILE_STORAGE_KEY, value);
+  } catch {
+    // localStorage full — non-fatal
+  }
+}
 
 function loadNGFlags(): Set<NGFlagId> {
   try {
@@ -143,6 +167,23 @@ export default function App(): JSX.Element {
   const [mode, setMode] = useState<PostMode>(suggestedMode);
   const [sns, setSns] = useState<SnsKind>("threads");
   const charLimit = SNS_LABELS[sns].charLimit;
+
+  // Profile — ayaさんの具体プロフィール (family/age/job/location/lifestyle).
+  // Feeds into every generation's system prompt so the LLM stops inventing
+  // details like kids, jobs, or hobbies that don't apply.
+  // Auto-saved to localStorage on every keystroke; the explicit "保存"
+  // button is a UX reassurance (shows a transient confirmation message).
+  const [profile, setProfileState] = useState<string>(() => loadProfile());
+  const [profileSavedAt, setProfileSavedAt] = useState<string>("");
+  const setProfile = (next: string): void => {
+    setProfileState(next);
+    saveProfile(next);
+  };
+  const handleProfileSaveClick = (): void => {
+    saveProfile(profile);
+    setProfileSavedAt("保存しました ✓");
+    setTimeout(() => setProfileSavedAt(""), 2500);
+  };
 
   // NG (禁止事項) selections — restored from localStorage on mount.
   const [ngFlags, setNgFlagsState] = useState<Set<NGFlagId>>(() => loadNGFlags());
@@ -352,6 +393,11 @@ export default function App(): JSX.Element {
       ? `詳細はこちら👇\n${product!.affiliate_url}`
       : undefined;
 
+    // Threads API does not accept direct binary image upload (it requires a
+    // publicly reachable URL). We send images only to Bluesky; for Threads the
+    // user adds them manually after posting.
+    const imagePaths = sns === "bluesky" ? images : [];
+
     const snsLabel = SNS_LABELS[sns].short;
     const previewLines = [
       `${snsLabel} に投稿します。内容を確認してください。`,
@@ -360,6 +406,14 @@ export default function App(): JSX.Element {
     ];
     if (replyBody) {
       previewLines.push("", "--- リプライ (アフィ URL) ---", replyBody);
+    }
+    if (imagePaths.length > 0) {
+      previewLines.push("", `画像 ${imagePaths.length} 枚を添付`);
+    } else if (sns === "threads" && images.length > 0) {
+      previewLines.push(
+        "",
+        "⚠ Threads API は画像の直接アップロード非対応。投稿後に Threads アプリから追加してください。",
+      );
     }
     previewLines.push("", `${charCount} / ${charLimit} 字`);
     const ok = window.confirm(previewLines.join("\n"));
@@ -373,6 +427,7 @@ export default function App(): JSX.Element {
         sns,
         body: editedText,
         replyBody,
+        imagePaths,
       });
       if (resp.ok && resp.data) {
         setPublishResult(resp.data);
@@ -397,14 +452,14 @@ export default function App(): JSX.Element {
       let userPrompt = "";
       const ngList = [...ngFlags];
       if (mode === "preparation") {
-        systemPrompt = buildSystemPrompt(sns, "preparation", ngList);
+        systemPrompt = buildSystemPrompt(sns, "preparation", ngList, profile);
         userPrompt = buildPreparationUserPrompt(soulTopic, prepMemo, sns);
       } else {
         if (!product) {
           setError("本投稿モードでは、先に商品情報を取得してください。");
           return;
         }
-        systemPrompt = buildSystemPrompt(sns, "affiliate", ngList);
+        systemPrompt = buildSystemPrompt(sns, "affiliate", ngList, profile);
         userPrompt = buildAffiliateUserPrompt({
           productTitle: product.title,
           productDescription: product.description,
@@ -453,6 +508,59 @@ export default function App(): JSX.Element {
           </p>
         </div>
       </header>
+
+      <section className="panel profile-panel">
+        <details>
+          <summary>
+            <span className="ng-title">プロフィール設定</span>
+            {profile.trim() ? (
+              <span className="ng-badge">入力済み</span>
+            ) : (
+              <span className="ng-badge-empty">未入力</span>
+            )}
+            <span className="ng-caret" aria-hidden="true">
+              ▾
+            </span>
+          </summary>
+          <p className="ng-hint">
+            家族構成・年齢・職業・ライフスタイルなどを書いておくと、LLM
+            が的外れな属性 (子ども #育児 等) を混ぜないようになります。
+            自動保存 (ブラウザ内)。
+          </p>
+          <label className="field">
+            <textarea
+              rows={6}
+              value={profile}
+              onChange={(e) => setProfile(e.target.value)}
+              placeholder={PROFILE_PLACEHOLDER}
+            />
+          </label>
+          <div className="row" style={{ marginTop: "0.5rem" }}>
+            <button
+              type="button"
+              className="btn-primary"
+              onClick={handleProfileSaveClick}
+            >
+              💾 保存
+            </button>
+            {profile.trim() && (
+              <button
+                type="button"
+                onClick={() => {
+                  if (window.confirm("プロフィールをクリアしますか？")) {
+                    setProfile("");
+                  }
+                }}
+              >
+                クリア
+              </button>
+            )}
+            {profileSavedAt && (
+              <span className="copy-status">{profileSavedAt}</span>
+            )}
+          </div>
+        </details>
+      </section>
 
       <section className="panel ng-panel">
         <details>
@@ -663,8 +771,10 @@ export default function App(): JSX.Element {
         <h2>画像 (任意)</h2>
         <p className="image-hint">
           生活感のある写真は滞在時間 (A 級シグナル) を伸ばす重要要素。
-          最大 {MAX_IMAGES} 枚 / 1 枚 {MAX_IMAGE_SIZE_MB}MB まで。
-          <span className="image-note">※ Stage 3.c で実投稿時に添付、今は選択のみ。</span>
+          Bluesky は最大 4 枚 / 1 枚 976 KB まで実投稿に添付されます。
+          <span className="image-note">
+            ※ Threads API は画像の直接アップロード非対応のため、投稿後に Threads アプリから手動追加してください。
+          </span>
         </p>
         <div className="row">
           <button

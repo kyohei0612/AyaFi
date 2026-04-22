@@ -161,8 +161,10 @@ const BLUESKY_ALGORITHM_RULES = `
 `.trim();
 
 const THREADS_PREPARATION_SYSTEM_PROMPT = `
-あなたは日本語で Threads 投稿文を書く、30 代主婦「aya」のアシスタントです。
-aya は 2 児の母で、時短と効率に興味があり、優しく率直な口調で書きます。
+あなたは日本語で Threads 投稿文を書く「aya」さんのアシスタントです。
+aya さんの具体的な背景 (家族構成・年齢・職業・趣味など) は
+「【ayaさんのプロフィール】」ブロックを必ず最優先で参照し、そこに書かれて
+いない属性 (例: 子ども・ペット・パートナー等) を勝手に持ち込まないこと。
 
 ${THREADS_ALGORITHM_RULES}
 
@@ -176,8 +178,10 @@ ${THREADS_ALGORITHM_RULES}
 `.trim();
 
 const THREADS_AFFILIATE_SYSTEM_PROMPT = `
-あなたは日本語で Threads 投稿文を書く、30 代主婦「aya」のアシスタントです。
-aya は 2 児の母で、時短と効率に興味があり、優しく率直な口調で書きます。
+あなたは日本語で Threads 投稿文を書く「aya」さんのアシスタントです。
+aya さんの具体的な背景 (家族構成・年齢・職業・趣味など) は
+「【ayaさんのプロフィール】」ブロックを必ず最優先で参照し、そこに書かれて
+いない属性 (例: 子ども・ペット・パートナー等) を勝手に持ち込まないこと。
 
 ${THREADS_ALGORITHM_RULES}
 
@@ -191,8 +195,10 @@ ${THREADS_ALGORITHM_RULES}
 `.trim();
 
 const BLUESKY_PREPARATION_SYSTEM_PROMPT = `
-あなたは日本語で Bluesky 投稿文を書く、30 代主婦「aya」のアシスタントです。
-aya は 2 児の母で、時短と効率に興味があり、落ち着いた率直な口調で書きます。
+あなたは日本語で Bluesky 投稿文を書く「aya」さんのアシスタントです。
+aya さんの具体的な背景 (家族構成・年齢・職業・趣味など) は
+「【ayaさんのプロフィール】」ブロックを必ず最優先で参照し、そこに書かれて
+いない属性 (例: 子ども・ペット・パートナー等) を勝手に持ち込まないこと。
 
 ${BLUESKY_ALGORITHM_RULES}
 
@@ -206,8 +212,10 @@ ${BLUESKY_ALGORITHM_RULES}
 `.trim();
 
 const BLUESKY_AFFILIATE_SYSTEM_PROMPT = `
-あなたは日本語で Bluesky 投稿文を書く、30 代主婦「aya」のアシスタントです。
-aya は 2 児の母で、時短と効率に興味があり、落ち着いた率直な口調で書きます。
+あなたは日本語で Bluesky 投稿文を書く「aya」さんのアシスタントです。
+aya さんの具体的な背景 (家族構成・年齢・職業・趣味など) は
+「【ayaさんのプロフィール】」ブロックを必ず最優先で参照し、そこに書かれて
+いない属性 (例: 子ども・ペット・パートナー等) を勝手に持ち込まないこと。
 
 ${BLUESKY_ALGORITHM_RULES}
 
@@ -234,20 +242,32 @@ export function buildSystemPrompt(
   sns: SnsKind,
   mode: PostMode,
   ngFlagIds: readonly NGFlagId[] = [],
+  profile: string = "",
 ): string {
   const base = pickBasePrompt(sns, mode);
-  if (ngFlagIds.length === 0) return base;
-  const rules = ngFlagIds
-    .map((id) => NG_OPTIONS[id]?.rule)
-    .filter((r): r is string => Boolean(r))
-    .map((r) => `- ${r}`)
-    .join("\n");
-  if (!rules) return base;
-  return (
-    base +
-    "\n\n【ayaさんが指定した追加の禁止事項 — 必ず守る】\n" +
-    rules
-  );
+  const sections: string[] = [base];
+
+  const cleanedProfile = profile.trim();
+  if (cleanedProfile) {
+    sections.push(
+      "【ayaさんのプロフィール — 最優先、捏造禁止】\n" + cleanedProfile,
+    );
+  }
+
+  if (ngFlagIds.length > 0) {
+    const rules = ngFlagIds
+      .map((id) => NG_OPTIONS[id]?.rule)
+      .filter((r): r is string => Boolean(r))
+      .map((r) => `- ${r}`)
+      .join("\n");
+    if (rules) {
+      sections.push(
+        "【ayaさんが指定した追加の禁止事項 — 必ず守る】\n" + rules,
+      );
+    }
+  }
+
+  return sections.join("\n\n");
 }
 
 export function buildPreparationUserPrompt(
