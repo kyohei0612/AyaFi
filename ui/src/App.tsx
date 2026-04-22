@@ -508,14 +508,49 @@ export default function App(): JSX.Element {
 
   const generateOne = async (sns: SnsKind): Promise<GenerateData | null> => {
     const { system, user } = buildPromptsFor(sns);
-    const resp = await invoke<SidecarResponse<GenerateData>>("generate_post", {
-      systemPrompt: system,
-      userPrompt: user,
-    });
-    if (resp.ok && resp.data) return resp.data;
-    throw new Error(
-      `${SNS_LABELS[sns].short}: ${resp.error?.type}: ${resp.error?.message}`,
-    );
+    const limit = SNS_LABELS[sns].charLimit;
+
+    const callLLM = async (
+      userPrompt: string,
+    ): Promise<SidecarResponse<GenerateData>> =>
+      invoke<SidecarResponse<GenerateData>>("generate_post", {
+        systemPrompt: system,
+        userPrompt,
+      });
+
+    let resp = await callLLM(user);
+    if (!(resp.ok && resp.data)) {
+      throw new Error(
+        `${SNS_LABELS[sns].short}: ${resp.error?.type}: ${resp.error?.message}`,
+      );
+    }
+    let text = resp.data.text;
+    let data = resp.data;
+
+    // Hard-enforce the char limit: LLMs routinely overshoot by 10-20%. Up to
+    // two follow-up calls ask for a shortened rewrite, preserving the
+    // specific episodes / tags but trimming adornment.
+    for (let attempt = 1; attempt <= 2 && [...text].length > limit; attempt++) {
+      const over = [...text].length;
+      const shortenPrompt = [
+        `以下の投稿文は ${over} 字で、上限 ${limit} 字を超えています。`,
+        `意味・感情・具体エピソード・末尾の問いかけとタグは保ったまま、`,
+        `必ず ${limit - 20} 字以下 (目安 ${limit - 40} 字) に削って書き直してください。`,
+        `削るもの: 装飾語、言い換えの重複、「〜ような」系のぼかし表現。`,
+        ``,
+        `【対象の投稿文】`,
+        text,
+      ].join("\n");
+      const retry = await callLLM(shortenPrompt);
+      if (retry.ok && retry.data) {
+        text = retry.data.text;
+        data = retry.data;
+      } else {
+        break;
+      }
+    }
+
+    return { ...data, text };
   };
 
   const handleGenerate = async (): Promise<void> => {
