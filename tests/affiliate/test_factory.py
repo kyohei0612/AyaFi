@@ -19,6 +19,7 @@ def _settings(**overrides: object) -> Settings:
         "moshimo_amazon_pc_id": None,
         "moshimo_amazon_pl_id": None,
         "rakuten_application_id": None,
+        "rakuten_access_key": None,
         "rakuten_affiliate_id": None,
     }
     defaults.update(overrides)
@@ -49,7 +50,7 @@ def test_amazon_url_without_moshimo_ids_raises_config_error() -> None:
 
 
 def test_rakuten_url_routes_to_rakuten() -> None:
-    settings = _settings(rakuten_application_id="APP")
+    settings = _settings(rakuten_application_id="uuid-app", rakuten_access_key="pk_key")
     provider = create_provider_for_url("https://item.rakuten.co.jp/shop/item/", settings)
     assert isinstance(provider, RakutenProvider)
 
@@ -57,6 +58,12 @@ def test_rakuten_url_routes_to_rakuten() -> None:
 def test_rakuten_url_without_app_id_raises_config_error() -> None:
     settings = _settings()
     with pytest.raises(AffiliateConfigError, match="RAKUTEN_APPLICATION_ID"):
+        create_provider_for_url("https://item.rakuten.co.jp/shop/item/", settings)
+
+
+def test_rakuten_url_without_access_key_raises_config_error() -> None:
+    settings = _settings(rakuten_application_id="uuid-app")
+    with pytest.raises(AffiliateConfigError, match="RAKUTEN_ACCESS_KEY"):
         create_provider_for_url("https://item.rakuten.co.jp/shop/item/", settings)
 
 

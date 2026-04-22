@@ -23,7 +23,7 @@ from aya_afi.ipc.protocol import (
 )
 from aya_afi.llm.base import GenerationRequest, LLMProvider
 from aya_afi.sns_engine.base import PostMode, SnsKind
-from aya_afi.sns_engine.validators import validate_threads_post
+from aya_afi.sns_engine.validators import validate_bluesky_post, validate_threads_post
 
 HandlerFn = Callable[[Request], Awaitable[dict[str, object]]]
 
@@ -68,9 +68,12 @@ async def handle_validate_content(req: Request) -> dict[str, object]:
 
     if sns == SnsKind.threads:
         report = validate_threads_post(params.body, mode)
+    elif sns == SnsKind.bluesky:
+        report = validate_bluesky_post(params.body, mode)
     else:
-        # Bluesky / note validators land in Stage 4.b. For now, return a
-        # minimal report so the UI can show "validator not yet available".
+        # note validator is intentionally empty — the "publish" path for note
+        # is just a clipboard copy, and wife edits in note's own editor with
+        # its own formatting rules. See ADR-006.
         from aya_afi.sns_engine.base import ValidationReport
 
         report = ValidationReport(sns=sns, mode=mode, char_count=len(params.body), issues=[])

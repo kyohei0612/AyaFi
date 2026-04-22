@@ -38,12 +38,20 @@ def create_provider_for_url(url: str, settings: Settings) -> AffiliateProvider:
         case ProductSource.rakuten:
             if not settings.rakuten_application_id:
                 raise AffiliateConfigError(
-                    "RAKUTEN_APPLICATION_ID is required in .env to fetch "
+                    "RAKUTEN_APPLICATION_ID (UUID) is required in .env to fetch "
                     "Rakuten product info; get it free at "
                     "https://webservice.rakuten.co.jp/"
                 )
+            if not settings.rakuten_access_key:
+                raise AffiliateConfigError(
+                    "RAKUTEN_ACCESS_KEY (pk_...) is required in .env for the "
+                    "new Rakuten API. Copy it from the dashboard next to the "
+                    "applicationId (click the 👁 icon to reveal)."
+                )
             return RakutenProvider(
                 application_id=settings.rakuten_application_id,
+                access_key=settings.rakuten_access_key,
+                origin=settings.rakuten_origin,
                 affiliate_id=settings.rakuten_affiliate_id,
             )
         case ProductSource.unknown:

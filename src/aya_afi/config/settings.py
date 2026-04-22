@@ -61,10 +61,27 @@ class Settings(BaseSettings):
     gemini_api_key_fallback: str | None = Field(default=None)
     anthropic_api_key: str | None = Field(default=None)
 
-    # --- Affiliate (Rakuten direct) ---
+    # --- Affiliate (Rakuten direct, 2026 new portal format) ---
     rakuten_application_id: str | None = Field(
         default=None,
-        description="Rakuten Web Service アプリ ID (https://webservice.rakuten.co.jp/)",
+        description=(
+            "Rakuten アプリ ID (UUID). From Rakuten Developers dashboard → "
+            "アプリ管理 → your app → アプリケーション ID."
+        ),
+    )
+    rakuten_access_key: str | None = Field(
+        default=None,
+        description=(
+            "Rakuten access key (pk_...). Shown next to applicationId in the "
+            "same dashboard (click the 👁 icon to reveal)."
+        ),
+    )
+    rakuten_origin: str = Field(
+        default="https://github.com",
+        description=(
+            "Must match one of the '許可されたウェブサイト' entries registered "
+            "for the Rakuten app. Sent as the HTTP Origin header."
+        ),
     )
     rakuten_affiliate_id: str | None = Field(
         default=None, description="Rakuten Affiliate ID for click tracking."
