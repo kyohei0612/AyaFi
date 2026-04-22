@@ -1,0 +1,37 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "AyaFi",
+  "version": "0.1.0",
+  "identifier": "jp.kyohei.ayaafi",
+  "build": {
+    "beforeDevCommand": "pnpm dev",
+    "devUrl": "http://localhost:5173",
+    "beforeBuildCommand": "pnpm build",
+    "frontendDist": "../ui/dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "AyaFi",
+        "width": 1100,
+        "height": 780,
+        "minWidth": 900,
+        "minHeight": 640,
+        "resizable": true,
+        "fullscreen": false,
+        "center": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": false,
+    "targets": ["msi", "nsis"],
+    "category": "Productivity",
+    "shortDescription": "AyaFi — SNS アフィ投稿支援ツール",
+    "longDescription": "AyaFi: 妻 (aya) 向け、Threads / Bluesky / note への半自動アフィ投稿ツール"
+  }
+}

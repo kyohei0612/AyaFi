@@ -1,0 +1,774 @@
+import { useEffect, useMemo, useRef, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
+
+const MAX_IMAGES = 10;
+const MAX_IMAGE_SIZE_MB = 8;
+import {
+  NGFlagId,
+  NG_OPTIONS,
+  PostMode,
+  SOUL_TOPICS,
+  SoulTopicId,
+  buildAffiliateUserPrompt,
+  buildPreparationUserPrompt,
+  buildSystemPrompt,
+  pickRandomTopic,
+  suggestModeForDate,
+} from "./prompts";
+
+const NG_STORAGE_KEY = "aya-afi.ngFlags";
+
+function loadNGFlags(): Set<NGFlagId> {
+  try {
+    const raw = localStorage.getItem(NG_STORAGE_KEY);
+    if (!raw) return new Set();
+    const parsed: unknown = JSON.parse(raw);
+    if (Array.isArray(parsed)) {
+      const valid = parsed.filter(
+        (v): v is NGFlagId =>
+          typeof v === "string" && Object.hasOwn(NG_OPTIONS, v),
+      );
+      return new Set(valid);
+    }
+  } catch {
+    // corrupt state — fall through to empty
+  }
+  return new Set();
+}
+
+function saveNGFlags(flags: Set<NGFlagId>): void {
+  try {
+    localStorage.setItem(NG_STORAGE_KEY, JSON.stringify([...flags]));
+  } catch {
+    // localStorage quota / private mode — silently ignore
+  }
+}
+
+type SidecarResponse<T> = {
+  schema_version: number;
+  request_id: string;
+  ok: boolean;
+  data?: T;
+  error?: { type: string; message: string; retry_after_sec?: number | null };
+};
+
+type PingData = { pong?: boolean; echo?: string };
+
+type ProductData = {
+  url: string;
+  source: string;
+  affiliate_url: string;
+  title: string;
+  price_yen: number | null;
+  description: string;
+  image_urls: string[];
+  shop_name: string | null;
+  category: string | null;
+};
+
+type GenerateData = {
+  text: string;
+  model: string;
+  provider: string;
+  tokens_in: number;
+  tokens_out: number;
+  duration_ms: number;
+};
+
+type ValidationIssue = {
+  severity: "error" | "warning" | "info";
+  rule_id: string;
+  message: string;
+  field?: string | null;
+};
+
+type ValidationData = {
+  sns: string;
+  mode: string;
+  char_count: number;
+  error_count: number;
+  warning_count: number;
+  issues: ValidationIssue[];
+};
+
+const WEEKDAY_JA = ["日", "月", "火", "水", "木", "金", "土"] as const;
+
+function buildGreeting(now: Date, suggestedMode: PostMode): {
+  greeting: string;
+  dateLabel: string;
+  modeLabel: string;
+} {
+  const h = now.getHours();
+  const greeting =
+    h < 5
+      ? "おつかれさま、ayaさん"
+      : h < 10
+        ? "おはようございます、ayaさん"
+        : h < 17
+          ? "こんにちは、ayaさん"
+          : "こんばんは、ayaさん";
+  const dateLabel = `${now.getFullYear()}年${now.getMonth() + 1}月${now.getDate()}日 (${WEEKDAY_JA[now.getDay()]})`;
+  const modeLabel =
+    suggestedMode === "preparation" ? "準備期間モード推奨" : "本投稿モード推奨";
+  return { greeting, dateLabel, modeLabel };
+}
+
+export default function App(): JSX.Element {
+  const now = useMemo(() => new Date(), []);
+  const suggestedMode = useMemo(() => suggestModeForDate(now), [now]);
+  const hero = useMemo(() => buildGreeting(now, suggestedMode), [now, suggestedMode]);
+  const [mode, setMode] = useState<PostMode>(suggestedMode);
+
+  // NG (禁止事項) selections — restored from localStorage on mount.
+  const [ngFlags, setNgFlagsState] = useState<Set<NGFlagId>>(() => loadNGFlags());
+  const setNgFlags = (updater: (prev: Set<NGFlagId>) => Set<NGFlagId>): void => {
+    setNgFlagsState((prev) => {
+      const next = updater(prev);
+      saveNGFlags(next);
+      return next;
+    });
+  };
+  const toggleNg = (id: NGFlagId): void => {
+    setNgFlags((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  // Preparation mode state
+  const [soulTopic, setSoulTopic] = useState<SoulTopicId>(() =>
+    pickRandomTopic(),
+  );
+  const [prepMemo, setPrepMemo] = useState<string>("");
+
+  // Affiliate mode state
+  const [productUrl, setProductUrl] = useState<string>("");
+  const [fetching, setFetching] = useState<boolean>(false);
+  const [product, setProduct] = useState<ProductData | null>(null);
+  const [affMemo, setAffMemo] = useState<string>("");
+
+  // Images (attached to posts; actual upload happens in Stage 3)
+  const [images, setImages] = useState<File[]>([]);
+  const imageInputRef = useRef<HTMLInputElement>(null);
+  const imageUrls = useMemo(
+    () => images.map((f) => URL.createObjectURL(f)),
+    [images],
+  );
+  useEffect(() => {
+    return () => {
+      imageUrls.forEach(URL.revokeObjectURL);
+    };
+  }, [imageUrls]);
+
+  // Common
+  const [generating, setGenerating] = useState<boolean>(false);
+  const [generated, setGenerated] = useState<GenerateData | null>(null);
+  // Editable version of the generated text. Resets when ``generated`` changes.
+  const [editedText, setEditedText] = useState<string>("");
+  const [copyStatus, setCopyStatus] = useState<string>("");
+  const [error, setError] = useState<string>("");
+  const [validation, setValidation] = useState<ValidationData | null>(null);
+
+  useEffect(() => {
+    if (generated) {
+      setEditedText(generated.text);
+      setCopyStatus("");
+    }
+  }, [generated]);
+
+  // Auto-validate on text change (debounced). Stage 4.a: Threads rules only.
+  useEffect(() => {
+    if (!editedText.trim()) {
+      setValidation(null);
+      return;
+    }
+    const timer = setTimeout(async () => {
+      try {
+        const resp = await invoke<SidecarResponse<ValidationData>>(
+          "validate_content",
+          { sns: "threads", mode, body: editedText },
+        );
+        if (resp.ok && resp.data) setValidation(resp.data);
+      } catch {
+        // Best-effort: a validation failure should not block the UI.
+      }
+    }, 400);
+    return () => clearTimeout(timer);
+  }, [editedText, mode]);
+
+  const charCount = useMemo(
+    () => [...editedText].length,
+    [editedText],
+  );
+  const overLimit = charCount > 500;
+
+  const handleCopy = async (): Promise<void> => {
+    try {
+      await navigator.clipboard.writeText(editedText);
+      setCopyStatus("コピーしました ✓");
+      setTimeout(() => setCopyStatus(""), 2500);
+    } catch (e) {
+      setCopyStatus(`コピー失敗: ${String(e)}`);
+    }
+  };
+
+  const handleCopyAndOpenNote = async (): Promise<void> => {
+    try {
+      setError("");
+      await navigator.clipboard.writeText(editedText);
+      await invoke("open_note_compose");
+      setCopyStatus("note を開きました、本文欄で Ctrl+V で貼り付け ✓");
+      setTimeout(() => setCopyStatus(""), 5000);
+    } catch (e) {
+      setError(`note へのコピー失敗: ${String(e)}`);
+    }
+  };
+
+  const handleResetText = (): void => {
+    if (generated) setEditedText(generated.text);
+  };
+
+  const handleImagePick = (): void => {
+    imageInputRef.current?.click();
+  };
+
+  const handleImageSelect = (
+    e: React.ChangeEvent<HTMLInputElement>,
+  ): void => {
+    setError("");
+    const picked = e.target.files;
+    if (!picked) return;
+    const limit = MAX_IMAGES - images.length;
+    const accepted: File[] = [];
+    const rejected: string[] = [];
+    for (const file of Array.from(picked).slice(0, limit)) {
+      if (file.size > MAX_IMAGE_SIZE_MB * 1024 * 1024) {
+        rejected.push(`${file.name} (${(file.size / 1024 / 1024).toFixed(1)}MB 超過)`);
+        continue;
+      }
+      accepted.push(file);
+    }
+    if (rejected.length) {
+      setError(
+        `次の画像は ${MAX_IMAGE_SIZE_MB}MB を超えるためスキップ: ${rejected.join(", ")}`,
+      );
+    }
+    setImages([...images, ...accepted]);
+    if (imageInputRef.current) imageInputRef.current.value = "";
+  };
+
+  const handleImageRemove = (idx: number): void => {
+    setImages(images.filter((_, i) => i !== idx));
+  };
+
+  const handleImageClear = (): void => {
+    setImages([]);
+  };
+
+  // Ping (疎通確認)
+  const [pong, setPong] = useState<string>("");
+  const [sidecarPong, setSidecarPong] = useState<string>("");
+  const [pingMessage, setPingMessage] = useState<string>("hello sidecar");
+
+  const handlePing = async (): Promise<void> => {
+    try {
+      setError("");
+      setPong(await invoke<string>("ping"));
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  const handleSidecarPing = async (): Promise<void> => {
+    try {
+      setError("");
+      const resp = await invoke<SidecarResponse<PingData>>("sidecar_ping", {
+        message: pingMessage,
+      });
+      if (resp.ok) {
+        setSidecarPong(`echo=${resp.data?.echo ?? "(none)"}`);
+      } else {
+        setError(`sidecar error: ${resp.error?.type}: ${resp.error?.message}`);
+      }
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  const handleOpenLogs = async (): Promise<void> => {
+    try {
+      setError("");
+      await invoke("open_logs_dir");
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  const handleFetchProduct = async (): Promise<void> => {
+    try {
+      setError("");
+      setProduct(null);
+      setFetching(true);
+      const resp = await invoke<SidecarResponse<ProductData>>("fetch_product", {
+        url: productUrl,
+      });
+      if (resp.ok && resp.data) {
+        setProduct(resp.data);
+      } else {
+        setError(`fetch error: ${resp.error?.type}: ${resp.error?.message}`);
+      }
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setFetching(false);
+    }
+  };
+
+  const handleGenerate = async (): Promise<void> => {
+    try {
+      setError("");
+      setGenerated(null);
+
+      let systemPrompt = "";
+      let userPrompt = "";
+      const ngList = [...ngFlags];
+      if (mode === "preparation") {
+        systemPrompt = buildSystemPrompt("preparation", ngList);
+        userPrompt = buildPreparationUserPrompt(soulTopic, prepMemo);
+      } else {
+        if (!product) {
+          setError("本投稿モードでは、先に商品情報を取得してください。");
+          return;
+        }
+        systemPrompt = buildSystemPrompt("affiliate", ngList);
+        userPrompt = buildAffiliateUserPrompt({
+          productTitle: product.title,
+          productDescription: product.description,
+          productShop: product.shop_name,
+          productPriceYen: product.price_yen,
+          productAffiliateUrl: product.affiliate_url,
+          userInput: affMemo,
+        });
+      }
+
+      setGenerating(true);
+      const resp = await invoke<SidecarResponse<GenerateData>>(
+        "generate_post",
+        { systemPrompt, userPrompt },
+      );
+      if (resp.ok && resp.data) {
+        setGenerated(resp.data);
+      } else {
+        setError(`generate error: ${resp.error?.type}: ${resp.error?.message}`);
+      }
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setGenerating(false);
+    }
+  };
+
+  return (
+    <main className="container">
+      <header className="hero">
+        <div className="hero-brand">
+          <span className="brand-mark" aria-hidden="true">
+            A
+          </span>
+          <h1>AyaFi</h1>
+        </div>
+        <p className="hero-subtitle">
+          SNS アフィ投稿支援ツール · Threads アルゴリズム対応
+        </p>
+        <div className="hero-card">
+          <p className="hero-greeting">{hero.greeting}。</p>
+          <p className="hero-meta">
+            {hero.dateLabel}
+            <span className="hero-mode-pill">{hero.modeLabel}</span>
+          </p>
+        </div>
+      </header>
+
+      <section className="panel ng-panel">
+        <details open={ngFlags.size > 0}>
+          <summary>
+            <span className="ng-title">NG 条件 (禁止事項)</span>
+            {ngFlags.size > 0 ? (
+              <span className="ng-badge">{ngFlags.size} 項目選択中</span>
+            ) : (
+              <span className="ng-badge-empty">未選択</span>
+            )}
+            <span className="ng-caret" aria-hidden="true">
+              ▾
+            </span>
+          </summary>
+          <p className="ng-hint">
+            チェックした内容は LLM への指示に毎回追加されます。選択は自動保存 (ブラウザ内) されます。
+          </p>
+          <div className="ng-grid">
+            {(Object.keys(NG_OPTIONS) as NGFlagId[]).map((id) => {
+              const opt = NG_OPTIONS[id];
+              const checked = ngFlags.has(id);
+              return (
+                <label
+                  key={id}
+                  className={checked ? "ng-item ng-item-on" : "ng-item"}
+                >
+                  <input
+                    type="checkbox"
+                    checked={checked}
+                    onChange={() => toggleNg(id)}
+                  />
+                  <span className="ng-item-body">
+                    <span className="ng-item-label">{opt.label}</span>
+                    <span className="ng-item-hint">{opt.hint}</span>
+                  </span>
+                </label>
+              );
+            })}
+          </div>
+          {ngFlags.size > 0 && (
+            <div className="row" style={{ marginTop: "0.5rem" }}>
+              <button
+                type="button"
+                onClick={() => setNgFlags(() => new Set())}
+              >
+                すべて解除
+              </button>
+            </div>
+          )}
+        </details>
+      </section>
+
+      <section className="panel mode-panel">
+        <h2>投稿モード</h2>
+        <div className="mode-toggle">
+          <button
+            type="button"
+            className={mode === "preparation" ? "mode-active" : "mode-inactive"}
+            onClick={() => setMode("preparation")}
+          >
+            準備期間 (月〜木)
+          </button>
+          <button
+            type="button"
+            className={mode === "affiliate" ? "mode-active" : "mode-inactive"}
+            onClick={() => setMode("affiliate")}
+          >
+            本投稿 / アフィ (金〜日)
+          </button>
+        </div>
+        <p className="mode-hint">
+          {mode === "preparation"
+            ? "信用貯金フェーズ。商品紹介なし、魂の 5 大お題から日常を書きます。親ポストにリンク禁止、タグは 1 つだけ。"
+            : "週末の買い物欲ピーク用。商品 URL 取得 → アフィ文生成 → 親ポストは本文のみ + リプ側にリンク (2 段階投稿は Stage 3 で自動化)。"}
+          {" 推奨: "}
+          {suggestedMode === mode ? "今日の推奨モードです ✓" : `今日は「${suggestedMode === "preparation" ? "準備期間" : "本投稿"}」が推奨`}
+        </p>
+      </section>
+
+      {mode === "preparation" ? (
+        <section className="panel">
+          <h2>魂の 5 大お題</h2>
+          <div className="mode-toggle topic-chips">
+            {(Object.keys(SOUL_TOPICS) as SoulTopicId[]).map((k) => (
+              <button
+                key={k}
+                type="button"
+                className={soulTopic === k ? "mode-active" : "mode-inactive"}
+                onClick={() => setSoulTopic(k)}
+              >
+                {SOUL_TOPICS[k].label}
+              </button>
+            ))}
+            <button
+              type="button"
+              className="mode-inactive"
+              onClick={() => setSoulTopic(pickRandomTopic())}
+            >
+              ランダム 🎲
+            </button>
+          </div>
+          <p className="mode-hint">{SOUL_TOPICS[soulTopic].hint}</p>
+          <label className="field">
+            <span>ayaのメモ (具体シーン / 感情 / 失敗など、箇条書きで OK)</span>
+            <textarea
+              rows={4}
+              value={prepMemo}
+              onChange={(e) => setPrepMemo(e.target.value)}
+              placeholder="例: 3000円で買った折りたたみ傘、結局 2 回使ってお蔵入り..."
+            />
+          </label>
+        </section>
+      ) : (
+        <section className="panel">
+          <h2>商品情報 (楽天 / Amazon)</h2>
+          <label className="field">
+            <span>商品 URL</span>
+            <input
+              type="text"
+              value={productUrl}
+              onChange={(e) => setProductUrl(e.target.value)}
+              placeholder="https://item.rakuten.co.jp/... or https://amazon.co.jp/dp/..."
+            />
+          </label>
+          <div className="row">
+            <button
+              type="button"
+              onClick={handleFetchProduct}
+              disabled={fetching || !productUrl}
+            >
+              {fetching ? "取得中…" : "商品情報を取得"}
+            </button>
+          </div>
+          {product && (
+            <div className="output">
+              <div className="meta">
+                source={product.source} · shop={product.shop_name ?? "-"}
+              </div>
+              <div className="product-title">
+                {product.title || "(タイトル未取得 — メモで補足してください)"}
+              </div>
+              {product.price_yen !== null && (
+                <div>¥{product.price_yen.toLocaleString()}</div>
+              )}
+              {product.description && (
+                <div className="product-desc">
+                  {product.description.slice(0, 200)}
+                </div>
+              )}
+              <div className="product-link">
+                アフィ URL (リプ側に配置):{" "}
+                <a
+                  href={product.affiliate_url}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  {product.affiliate_url.length > 80
+                    ? product.affiliate_url.slice(0, 77) + "…"
+                    : product.affiliate_url}
+                </a>
+              </div>
+            </div>
+          )}
+          <label className="field">
+            <span>ayaの補足メモ (強調したい点 / 使用感 / NG など)</span>
+            <textarea
+              rows={3}
+              value={affMemo}
+              onChange={(e) => setAffMemo(e.target.value)}
+              placeholder="例: 蓋が丸ごと外せて洗いやすいのが刺さった。買って 2 週間。"
+            />
+          </label>
+        </section>
+      )}
+
+      <section className="panel image-panel">
+        <h2>画像 (任意)</h2>
+        <p className="image-hint">
+          生活感のある写真は滞在時間 (A 級シグナル) を伸ばす重要要素。
+          最大 {MAX_IMAGES} 枚 / 1 枚 {MAX_IMAGE_SIZE_MB}MB まで。
+          <span className="image-note">※ Stage 3 で実投稿時に添付、今は選択のみ。</span>
+        </p>
+        <input
+          ref={imageInputRef}
+          type="file"
+          accept="image/jpeg,image/png,image/webp"
+          multiple
+          onChange={handleImageSelect}
+          style={{ display: "none" }}
+        />
+        <div className="row">
+          <button
+            type="button"
+            onClick={handleImagePick}
+            disabled={images.length >= MAX_IMAGES}
+          >
+            🖼 画像を選ぶ ({images.length}/{MAX_IMAGES})
+          </button>
+          {images.length > 0 && (
+            <button type="button" onClick={handleImageClear}>
+              すべて外す
+            </button>
+          )}
+        </div>
+        {images.length > 0 && (
+          <div className="image-grid">
+            {images.map((file, idx) => (
+              <div key={`${file.name}-${file.size}-${idx}`} className="image-thumb">
+                <img src={imageUrls[idx]} alt={file.name} />
+                <button
+                  type="button"
+                  className="image-remove"
+                  onClick={() => handleImageRemove(idx)}
+                  title="この画像を外す"
+                  aria-label={`${file.name} を外す`}
+                >
+                  ×
+                </button>
+                <div className="image-meta">
+                  <span className="image-name" title={file.name}>
+                    {file.name}
+                  </span>
+                  <span className="image-size">
+                    {(file.size / 1024).toFixed(0)} KB
+                  </span>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+
+      <section className="panel generate-section">
+        <h2>文章生成 ({mode === "preparation" ? "準備期間" : "本投稿"}モード)</h2>
+        <div className="row">
+          <button
+            type="button"
+            className="btn-primary"
+            onClick={handleGenerate}
+            disabled={generating || (mode === "affiliate" && !product)}
+          >
+            {generating ? "生成中…" : "✨ 生成"}
+          </button>
+          {mode === "affiliate" && !product && (
+            <span className="hint-inline">先に商品情報を取得してください</span>
+          )}
+        </div>
+        {generated && (
+          <div className="output">
+            <div className="meta">
+              provider={generated.provider} · model={generated.model} ·
+              tokens in/out={generated.tokens_in}/{generated.tokens_out} ·
+              {generated.duration_ms}ms
+            </div>
+            <textarea
+              className="generated-edit"
+              rows={10}
+              value={editedText}
+              onChange={(e) => setEditedText(e.target.value)}
+              spellCheck={false}
+            />
+            <div className="row generated-toolbar">
+              <button type="button" onClick={handleCopy}>
+                📋 コピー
+              </button>
+              <button
+                type="button"
+                className="btn-note"
+                onClick={handleCopyAndOpenNote}
+                title="クリップボードにコピーしてから note 新規投稿ページを開きます"
+              >
+                📝 note にコピー & 開く
+              </button>
+              <button type="button" onClick={handleResetText}>
+                ↺ 元に戻す
+              </button>
+              <span className={overLimit ? "char-count over" : "char-count"}>
+                {charCount} / 500 字
+                {overLimit && " — 超過！"}
+              </span>
+              {copyStatus && <span className="copy-status">{copyStatus}</span>}
+            </div>
+            {validation && <ValidationPanel validation={validation} />}
+            <div className="post-hint">
+              {mode === "affiliate"
+                ? "⚠ 親ポストに URL が混入していないか確認。投稿後 15 分以内に自己リプ返信しよう。"
+                : "⚠ 商品名や URL が混入していないか確認 (準備期間は信用貯金フェーズ)。"}
+            </div>
+          </div>
+        )}
+      </section>
+
+      {error && (
+        <section className="panel error-panel">
+          <p className="error">Error: {error}</p>
+        </section>
+      )}
+
+      {/* Dev-only diagnostics — hidden in `pnpm tauri build` (production). */}
+      {import.meta.env.DEV && (
+        <section className="panel dev-panel">
+          <h2>🔧 疎通確認 (開発用)</h2>
+          <p className="dev-note">
+            本番ビルドでは非表示。ayaさんには見えません。
+          </p>
+          <div className="row">
+            <button type="button" onClick={handlePing}>
+              Ping (Rust のみ)
+            </button>
+          </div>
+          {pong && <p className="success">Rust Response: {pong}</p>}
+          <div className="row" style={{ marginTop: "0.75rem" }}>
+            <input
+              type="text"
+              value={pingMessage}
+              onChange={(e) => setPingMessage(e.target.value)}
+              placeholder="sidecar に送るメッセージ"
+            />
+            <button type="button" onClick={handleSidecarPing}>
+              Ping (Rust → Python → Rust)
+            </button>
+          </div>
+          {sidecarPong && (
+            <p className="success">Sidecar Response: {sidecarPong}</p>
+          )}
+        </section>
+      )}
+
+      <footer className="page-footer">
+        <button
+          type="button"
+          className="footer-link"
+          onClick={handleOpenLogs}
+          title="アプリの動作ログを保存しているフォルダを開きます"
+        >
+          うまく動かない時はこちら
+        </button>
+      </footer>
+    </main>
+  );
+}
+
+function ValidationPanel({
+  validation,
+}: {
+  validation: ValidationData;
+}): JSX.Element {
+  const { issues, error_count, warning_count } = validation;
+  if (issues.length === 0) {
+    return (
+      <div className="validation-panel validation-ok">
+        <span className="val-check">✓</span> Threads ルールチェック通過
+      </div>
+    );
+  }
+  return (
+    <div className="validation-panel">
+      <div className="val-summary">
+        {error_count > 0 && (
+          <span className="val-sum val-sum-error">⛔ エラー {error_count}</span>
+        )}
+        {warning_count > 0 && (
+          <span className="val-sum val-sum-warn">⚠ 注意 {warning_count}</span>
+        )}
+      </div>
+      <ul className="val-issues">
+        {issues.map((issue) => (
+          <li key={issue.rule_id} className={`val-issue val-${issue.severity}`}>
+            <span className="val-badge">
+              {issue.severity === "error"
+                ? "⛔"
+                : issue.severity === "warning"
+                  ? "⚠"
+                  : "ℹ"}
+            </span>
+            <span className="val-message">{issue.message}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}

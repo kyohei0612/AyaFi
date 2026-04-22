@@ -1,0 +1,51 @@
+# Secrets
+secrets/.env
+secrets/*.token
+secrets/*.json
+!secrets/.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+dist/
+build/
+
+# PyInstaller
+*.spec
+!*.template.spec
+
+# Node / Frontend
+node_modules/
+.pnpm-store/
+ui/dist/
+ui/.vite/
+tsconfig.tsbuildinfo
+*.tsbuildinfo
+
+# Tauri
+src-tauri/target/
+src-tauri/WixTools/
+src-tauri/gen/
+
+# DB
+*.sqlite
+*.sqlite3
+*.db
+
+# OS / Editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+
+# Logs
+logs/
+*.log

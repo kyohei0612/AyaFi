@@ -1,0 +1,53 @@
+# aya-afi-ver1 グローバル設定 (サンプル)
+# 利用時は app.yaml にリネームして値を埋める
+
+app:
+  # dry_run=true で投稿 API を叩かずログのみ (開発・テスト用)
+  dry_run: false
+  # ログレベル: DEBUG / INFO / WARNING / ERROR
+  log_level: INFO
+
+llm:
+  # どの LLM プロバイダを使うか: gemini / claude / ollama
+  provider: gemini
+  # gemini は 2.5 Flash (無料枠)
+  gemini:
+    model: gemini-2.5-flash
+    temperature: 0.8
+    max_output_tokens: 1024
+  # ローカル LLM は v0.2 以降で切替予定
+  ollama:
+    host: http://localhost:11434
+    model: llama3.1-swallow:8b-instruct-q4_K_M
+
+affiliate:
+  # v0.1 はもしもアフィリエイト経由のみ
+  provider: moshimo
+  moshimo:
+    # 提携済みプロモーション
+    promotions:
+      - amazon
+      - rakuten
+
+sns:
+  # 自動投稿対象
+  auto_post:
+    - threads
+    - bluesky
+  # ペーストのみ (投稿ボタンは人手)
+  paste_only:
+    - note
+
+storage:
+  # SQLite の保存先 (%APPDATA%\aya-afi\aya_afi.sqlite)
+  db_path: "%APPDATA%\\aya-afi\\aya_afi.sqlite"
+
+rate_limits:
+  # req/sec
+  rakuten: 1
+  moshimo: 1
+  # req/min
+  gemini: 60
+  # req/hour
+  threads: 200
+  bluesky: 3000
