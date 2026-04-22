@@ -18,6 +18,7 @@ fn main() {
     tauri::Builder::default()
         .manage(sidecar)
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             commands::ping,
             commands::sidecar_ping,

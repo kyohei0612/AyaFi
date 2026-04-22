@@ -8,7 +8,14 @@
     "core:window:default",
     "core:app:default",
     "core:path:default",
-    "opener:allow-open-url",
-    "opener:allow-open-path"
+    {
+      "identifier": "opener:allow-open-url",
+      "allow": [
+        { "url": "https://*" },
+        { "url": "http://*" }
+      ]
+    },
+    "opener:allow-open-path",
+    "dialog:allow-open"
   ]
 }

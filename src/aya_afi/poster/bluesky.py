@@ -8,6 +8,13 @@ ADR-005 note: Bluesky has NO server-side idempotency / client_token
 mechanism, so duplicate-post prevention relies entirely on ``storage``'s
 5-minute application-level block (Layer 1).
 
+Hashtag handling: ``client.send_post(text=<str>)`` sends plain text without
+facets, so ``#foo`` would not become a clickable / searchable tag. We use
+``TextBuilder`` to emit proper ``app.bsky.richtext.facet#tag`` segments so
+hashtags get picked up by custom feeds (which is the whole point of
+``tagLabel: "タグ 2-4 個"`` in the UI). Full-width ``＃`` is normalized to
+half-width ``#`` first, since LLMs mix both in Japanese output.
+
 Image attachment lands in a follow-up (Stage 3.c) — for now text-only posts.
 """
 
@@ -15,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 
 from aya_afi.poster.base import PostRequest, PostResult
 from aya_afi.poster.errors import (
@@ -23,6 +31,11 @@ from aya_afi.poster.errors import (
     PosterConfigError,
     PosterRateLimitError,
 )
+
+# Matches ``#tag`` where the tag contains letters/digits/underscore + any
+# JP-range code points. Stops at whitespace, ASCII punctuation, or EOS.
+# Excludes surrounding ``#`` so overlapping doesn't matter.
+_HASHTAG_RE = re.compile(r"#([^\s#!-/:-@\[-`{-~]+)")
 
 _log = logging.getLogger("aya_afi.poster.bluesky")
 
@@ -75,7 +88,10 @@ class BlueskyPoster:
         Returns the new post's AT URI (``at://did:.../app.bsky.feed.post/rkey``).
         """
         # Lazy import: keeps the module loadable without the SDK in test envs.
-        from atproto import Client
+        from atproto import Client, client_utils
+
+        normalized = body.replace("\uff03", "#")
+        text = _build_rich_text(normalized, client_utils.TextBuilder())
 
         client = Client()
         try:
@@ -83,7 +99,7 @@ class BlueskyPoster:
         except Exception as e:
             raise PosterAuthError(f"Bluesky login failed: {e}") from e
 
-        resp = client.send_post(text=body)
+        resp = client.send_post(text=text)
         return str(resp.uri)
 
     def _dry_run_result(self, req: PostRequest) -> PostResult:
@@ -114,3 +130,23 @@ def _translate_error(e: BaseException) -> Exception:
     if "auth" in lowered or "credential" in lowered or "401" in lowered:
         return PosterAuthError(message)
     return PosterAPIError(message)
+
+
+def _build_rich_text(body: str, tb: object) -> object:
+    """Split ``body`` into literal text and ``#tag`` segments on ``tb``.
+
+    Uses atproto's ``TextBuilder`` so each hashtag becomes a proper
+    ``app.bsky.richtext.facet#tag`` facet (clickable, surfaced to feeds).
+    The ``tb`` parameter is injected so the heavy ``atproto`` import stays
+    lazy — the caller constructs the builder after the SDK is available.
+    """
+    cursor = 0
+    for match in _HASHTAG_RE.finditer(body):
+        start, end = match.span()
+        if start > cursor:
+            tb.text(body[cursor:start])  # type: ignore[attr-defined]
+        tb.tag(match.group(0), match.group(1))  # type: ignore[attr-defined]
+        cursor = end
+    if cursor < len(body):
+        tb.text(body[cursor:])  # type: ignore[attr-defined]
+    return tb

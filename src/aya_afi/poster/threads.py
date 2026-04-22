@@ -82,9 +82,12 @@ class ThreadsPoster:
         reply_to_id: str | None,
     ) -> str:
         """Step 1+2 of the Threads posting flow. Returns the published post id."""
+        # Meta parses #tag server-side but only for half-width `#`; LLM output
+        # commonly mixes full-width `＃`, so normalize before sending.
+        normalized = text.replace("\uff03", "#")
         create_params: dict[str, str] = {
             "media_type": "TEXT",
-            "text": text,
+            "text": normalized,
             "access_token": self._access_token,
         }
         if reply_to_id is not None:

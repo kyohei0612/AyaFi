@@ -1,5 +1,16 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { useEffect, useMemo, useState } from "react";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { openUrl } from "@tauri-apps/plugin-opener";
+import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
+
+function pathToWebviewSrc(path: string): string {
+  return convertFileSrc(path);
+}
+
+function basename(path: string): string {
+  const m = path.replace(/\\/g, "/").match(/[^/]+$/);
+  return m ? m[0] : path;
+}
 
 const MAX_IMAGES = 10;
 const MAX_IMAGE_SIZE_MB = 8;
@@ -163,18 +174,13 @@ export default function App(): JSX.Element {
   const [product, setProduct] = useState<ProductData | null>(null);
   const [affMemo, setAffMemo] = useState<string>("");
 
-  // Images (attached to posts; actual upload happens in Stage 3)
-  const [images, setImages] = useState<File[]>([]);
-  const imageInputRef = useRef<HTMLInputElement>(null);
-  const imageUrls = useMemo(
-    () => images.map((f) => URL.createObjectURL(f)),
+  // Images (absolute filesystem paths from the Tauri file dialog). Actual
+  // upload to the SNS happens in Stage 3.c.
+  const [images, setImages] = useState<string[]>([]);
+  const imageThumbs = useMemo(
+    () => images.map((path) => ({ path, url: pathToWebviewSrc(path) })),
     [images],
   );
-  useEffect(() => {
-    return () => {
-      imageUrls.forEach(URL.revokeObjectURL);
-    };
-  }, [imageUrls]);
 
   // Common
   const [generating, setGenerating] = useState<boolean>(false);
@@ -247,33 +253,28 @@ export default function App(): JSX.Element {
     if (generated) setEditedText(generated.text);
   };
 
-  const handleImagePick = (): void => {
-    imageInputRef.current?.click();
-  };
-
-  const handleImageSelect = (
-    e: React.ChangeEvent<HTMLInputElement>,
-  ): void => {
+  const handleImagePick = async (): Promise<void> => {
     setError("");
-    const picked = e.target.files;
-    if (!picked) return;
-    const limit = MAX_IMAGES - images.length;
-    const accepted: File[] = [];
-    const rejected: string[] = [];
-    for (const file of Array.from(picked).slice(0, limit)) {
-      if (file.size > MAX_IMAGE_SIZE_MB * 1024 * 1024) {
-        rejected.push(`${file.name} (${(file.size / 1024 / 1024).toFixed(1)}MB 超過)`);
-        continue;
-      }
-      accepted.push(file);
+    const remaining = MAX_IMAGES - images.length;
+    if (remaining <= 0) return;
+    try {
+      const picked = await openFileDialog({
+        multiple: true,
+        directory: false,
+        filters: [
+          {
+            name: "Images",
+            extensions: ["jpg", "jpeg", "png", "webp"],
+          },
+        ],
+      });
+      if (!picked) return;
+      const paths = Array.isArray(picked) ? picked : [picked];
+      const next = [...images, ...paths.slice(0, remaining)];
+      setImages(next);
+    } catch (e) {
+      setError(`画像選択エラー: ${String(e)}`);
     }
-    if (rejected.length) {
-      setError(
-        `次の画像は ${MAX_IMAGE_SIZE_MB}MB を超えるためスキップ: ${rejected.join(", ")}`,
-      );
-    }
-    setImages([...images, ...accepted]);
-    if (imageInputRef.current) imageInputRef.current.value = "";
   };
 
   const handleImageRemove = (idx: number): void => {
@@ -454,7 +455,7 @@ export default function App(): JSX.Element {
       </header>
 
       <section className="panel ng-panel">
-        <details open={ngFlags.size > 0}>
+        <details>
           <summary>
             <span className="ng-title">NG 条件 (禁止事項)</span>
             {ngFlags.size > 0 ? (
@@ -627,15 +628,22 @@ export default function App(): JSX.Element {
               )}
               <div className="product-link">
                 アフィ URL (リプ側に配置):{" "}
-                <a
-                  href={product.affiliate_url}
-                  target="_blank"
-                  rel="noreferrer"
+                <button
+                  type="button"
+                  className="link-button"
+                  onClick={async () => {
+                    try {
+                      await openUrl(product.affiliate_url);
+                    } catch (e) {
+                      setError(`ブラウザを開けません: ${String(e)}`);
+                    }
+                  }}
+                  title="ブラウザで開く"
                 >
                   {product.affiliate_url.length > 80
                     ? product.affiliate_url.slice(0, 77) + "…"
                     : product.affiliate_url}
-                </a>
+                </button>
               </div>
             </div>
           )}
@@ -656,16 +664,8 @@ export default function App(): JSX.Element {
         <p className="image-hint">
           生活感のある写真は滞在時間 (A 級シグナル) を伸ばす重要要素。
           最大 {MAX_IMAGES} 枚 / 1 枚 {MAX_IMAGE_SIZE_MB}MB まで。
-          <span className="image-note">※ Stage 3 で実投稿時に添付、今は選択のみ。</span>
+          <span className="image-note">※ Stage 3.c で実投稿時に添付、今は選択のみ。</span>
         </p>
-        <input
-          ref={imageInputRef}
-          type="file"
-          accept="image/jpeg,image/png,image/webp"
-          multiple
-          onChange={handleImageSelect}
-          style={{ display: "none" }}
-        />
         <div className="row">
           <button
             type="button"
@@ -680,30 +680,30 @@ export default function App(): JSX.Element {
             </button>
           )}
         </div>
-        {images.length > 0 && (
+        {imageThumbs.length > 0 && (
           <div className="image-grid">
-            {images.map((file, idx) => (
-              <div key={`${file.name}-${file.size}-${idx}`} className="image-thumb">
-                <img src={imageUrls[idx]} alt={file.name} />
-                <button
-                  type="button"
-                  className="image-remove"
-                  onClick={() => handleImageRemove(idx)}
-                  title="この画像を外す"
-                  aria-label={`${file.name} を外す`}
-                >
-                  ×
-                </button>
-                <div className="image-meta">
-                  <span className="image-name" title={file.name}>
-                    {file.name}
-                  </span>
-                  <span className="image-size">
-                    {(file.size / 1024).toFixed(0)} KB
-                  </span>
+            {imageThumbs.map(({ path, url }, idx) => {
+              const name = basename(path);
+              return (
+                <div key={`${path}-${idx}`} className="image-thumb">
+                  <img src={url} alt={name} />
+                  <button
+                    type="button"
+                    className="image-remove"
+                    onClick={() => handleImageRemove(idx)}
+                    title="この画像を外す"
+                    aria-label={`${name} を外す`}
+                  >
+                    ×
+                  </button>
+                  <div className="image-meta">
+                    <span className="image-name" title={path}>
+                      {name}
+                    </span>
+                  </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </section>
@@ -789,13 +789,19 @@ export default function App(): JSX.Element {
                 {publishResult.sns_post_url && (
                   <>
                     {" "}
-                    <a
-                      href={publishResult.sns_post_url}
-                      target="_blank"
-                      rel="noreferrer"
+                    <button
+                      type="button"
+                      className="link-button"
+                      onClick={async () => {
+                        try {
+                          await openUrl(publishResult.sns_post_url!);
+                        } catch (e) {
+                          setError(`ブラウザを開けません: ${String(e)}`);
+                        }
+                      }}
                     >
                       投稿を開く
-                    </a>
+                    </button>
                   </>
                 )}
               </div>
