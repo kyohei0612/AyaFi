@@ -7,7 +7,9 @@ import {
   NGFlagId,
   NG_OPTIONS,
   PostMode,
+  SNS_LABELS,
   SOUL_TOPICS,
+  SnsKind,
   SoulTopicId,
   buildAffiliateUserPrompt,
   buildPreparationUserPrompt,
@@ -118,6 +120,8 @@ export default function App(): JSX.Element {
   const suggestedMode = useMemo(() => suggestModeForDate(now), [now]);
   const hero = useMemo(() => buildGreeting(now, suggestedMode), [now, suggestedMode]);
   const [mode, setMode] = useState<PostMode>(suggestedMode);
+  const [sns, setSns] = useState<SnsKind>("threads");
+  const charLimit = SNS_LABELS[sns].charLimit;
 
   // NG (禁止事項) selections — restored from localStorage on mount.
   const [ngFlags, setNgFlagsState] = useState<Set<NGFlagId>>(() => loadNGFlags());
@@ -178,7 +182,7 @@ export default function App(): JSX.Element {
     }
   }, [generated]);
 
-  // Auto-validate on text change (debounced). Stage 4.a: Threads rules only.
+  // Auto-validate on text change (debounced). Threads + Bluesky supported.
   useEffect(() => {
     if (!editedText.trim()) {
       setValidation(null);
@@ -188,7 +192,7 @@ export default function App(): JSX.Element {
       try {
         const resp = await invoke<SidecarResponse<ValidationData>>(
           "validate_content",
-          { sns: "threads", mode, body: editedText },
+          { sns, mode, body: editedText },
         );
         if (resp.ok && resp.data) setValidation(resp.data);
       } catch {
@@ -196,13 +200,13 @@ export default function App(): JSX.Element {
       }
     }, 400);
     return () => clearTimeout(timer);
-  }, [editedText, mode]);
+  }, [editedText, mode, sns]);
 
   const charCount = useMemo(
     () => [...editedText].length,
     [editedText],
   );
-  const overLimit = charCount > 500;
+  const overLimit = charCount > charLimit;
 
   const handleCopy = async (): Promise<void> => {
     try {
@@ -335,14 +339,14 @@ export default function App(): JSX.Element {
       let userPrompt = "";
       const ngList = [...ngFlags];
       if (mode === "preparation") {
-        systemPrompt = buildSystemPrompt("preparation", ngList);
-        userPrompt = buildPreparationUserPrompt(soulTopic, prepMemo);
+        systemPrompt = buildSystemPrompt(sns, "preparation", ngList);
+        userPrompt = buildPreparationUserPrompt(soulTopic, prepMemo, sns);
       } else {
         if (!product) {
           setError("本投稿モードでは、先に商品情報を取得してください。");
           return;
         }
-        systemPrompt = buildSystemPrompt("affiliate", ngList);
+        systemPrompt = buildSystemPrompt(sns, "affiliate", ngList);
         userPrompt = buildAffiliateUserPrompt({
           productTitle: product.title,
           productDescription: product.description,
@@ -350,6 +354,7 @@ export default function App(): JSX.Element {
           productPriceYen: product.price_yen,
           productAffiliateUrl: product.affiliate_url,
           userInput: affMemo,
+          sns,
         });
       }
 
@@ -443,6 +448,30 @@ export default function App(): JSX.Element {
       </section>
 
       <section className="panel mode-panel">
+        <h2>投稿先 SNS</h2>
+        <div className="mode-toggle">
+          {(Object.keys(SNS_LABELS) as SnsKind[]).map((k) => (
+            <button
+              key={k}
+              type="button"
+              className={sns === k ? "mode-active" : "mode-inactive"}
+              onClick={() => setSns(k)}
+            >
+              {SNS_LABELS[k].label}
+              <span className="sns-meta">
+                {SNS_LABELS[k].charLimit}字 / {SNS_LABELS[k].tagLabel}
+              </span>
+            </button>
+          ))}
+        </div>
+        <p className="mode-hint">
+          {sns === "threads"
+            ? "Threads: 親ポスト URL NG、タグ 1 個、会話誘発の質問で締める。リプライに URL を配置。"
+            : "Bluesky: URL 本文 OK、タグ 2-4 個必須 (カスタムフィード拾い)、具体スペック入れると刺さる。"}
+        </p>
+      </section>
+
+      <section className="panel mode-panel">
         <h2>投稿モード</h2>
         <div className="mode-toggle">
           <button
@@ -462,8 +491,8 @@ export default function App(): JSX.Element {
         </div>
         <p className="mode-hint">
           {mode === "preparation"
-            ? "信用貯金フェーズ。商品紹介なし、魂の 5 大お題から日常を書きます。親ポストにリンク禁止、タグは 1 つだけ。"
-            : "週末の買い物欲ピーク用。商品 URL 取得 → アフィ文生成 → 親ポストは本文のみ + リプ側にリンク (2 段階投稿は Stage 3 で自動化)。"}
+            ? "信用貯金フェーズ。商品紹介なし、魂の 5 大お題から日常を書きます。"
+            : "週末の買い物欲ピーク用。商品 URL 取得 → アフィ文生成。"}
           {" 推奨: "}
           {suggestedMode === mode ? "今日の推奨モードです ✓" : `今日は「${suggestedMode === "preparation" ? "準備期間" : "本投稿"}」が推奨`}
         </p>
@@ -667,7 +696,7 @@ export default function App(): JSX.Element {
                 ↺ 元に戻す
               </button>
               <span className={overLimit ? "char-count over" : "char-count"}>
-                {charCount} / 500 字
+                {charCount} / {charLimit} 字
                 {overLimit && " — 超過！"}
               </span>
               {copyStatus && <span className="copy-status">{copyStatus}</span>}

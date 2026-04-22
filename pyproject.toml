@@ -80,7 +80,7 @@ warn_return_any = true
 no_implicit_optional = true
 
 [[tool.mypy.overrides]]
-module = ["pythonjsonlogger.*", "pyperclip.*"]
+module = ["pythonjsonlogger.*", "pyperclip.*", "atproto", "atproto.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

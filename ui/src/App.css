@@ -463,6 +463,17 @@ button:disabled {
   font-size: 0.95rem;
   font-weight: 500;
   border-radius: var(--radius-md);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.2rem;
+}
+
+.sns-meta {
+  font-size: 0.72rem;
+  font-weight: 400;
+  opacity: 0.8;
+  color: inherit;
 }
 
 .mode-active {

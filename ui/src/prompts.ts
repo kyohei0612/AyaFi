@@ -1,12 +1,32 @@
 // プロンプトテンプレート (UI 側で組み立て、generate_post に送る)
-// 本質ルールは config/sns/threads.md と config/prompts/soul_topics.md を参照。
+// 本質ルールは config/sns/*.md と config/prompts/soul_topics.md を参照。
 // Stage 4 (ADR-009 SNS エンジン) で Python 側に移植予定。
 
 export type PostMode = "preparation" | "affiliate";
+export type SnsKind = "threads" | "bluesky";
+
+export const SNS_LABELS: Record<
+  SnsKind,
+  { label: string; short: string; charLimit: number; tagLabel: string }
+> = {
+  threads: {
+    label: "🧵 Threads",
+    short: "Threads",
+    charLimit: 500,
+    tagLabel: "タグ 1 個まで",
+  },
+  bluesky: {
+    label: "🦋 Bluesky",
+    short: "Bluesky",
+    charLimit: 300,
+    tagLabel: "タグ 2-4 個",
+  },
+};
 
 // ---------------------------------------------------------------------------
 // NG 条件 (禁止事項) — ayaさんがチェックした項目は system prompt に追記される。
-// 一般的なコンプライアンス (景表法 / 薬機法) + 文体の好み + アフィ注意点。
+// 文章の「見た目」に直接効く軸。景表法 / 薬機法系の機能的 NG は Stage 4 で
+// Validator 側に自動強制。
 // localStorage で永続化 (キー: "aya-afi.ngFlags")。
 // ---------------------------------------------------------------------------
 
@@ -22,11 +42,6 @@ export type NGFlagId =
   | "no_parenthetical_emote"
   | "compact_linebreaks";
 
-/**
- * 文章の「見た目」に直接効く NG 集。ayaさんが気に入った「絵文字なし」と同じ
- * 軸。景表法 / 薬機法系の機能的 NG は Stage 4 で Validator 側に自動強制する
- * 方針にしたので、ここでは入れない。
- */
 export const NG_OPTIONS: Record<
   NGFlagId,
   { label: string; hint: string; rule: string }
@@ -116,6 +131,11 @@ export const SOUL_TOPICS: Record<
   },
 };
 
+// ---------------------------------------------------------------------------
+// System prompts — SNS × mode の組み合わせで切り替え。
+// Threads と Bluesky はアルゴリズムが真逆 (URL 扱い / タグ数) なので別系統。
+// ---------------------------------------------------------------------------
+
 const THREADS_ALGORITHM_RULES = `
 【Threads アルゴリズムの鉄則 — 必ず守る】
 1. 親ポストに URL を絶対に含めない (アフィリンクは別途リプ側で扱う)
@@ -128,7 +148,19 @@ const THREADS_ALGORITHM_RULES = `
 8. 誇大表現 / 実体験の捏造禁止
 `.trim();
 
-const PREPARATION_SYSTEM_PROMPT = `
+const BLUESKY_ALGORITHM_RULES = `
+【Bluesky アルゴリズムの鉄則 — 必ず守る (Threads と真逆の部分あり)】
+1. 本文に URL を直接貼って OK (OGP カードで綺麗に表示される)
+2. ハッシュタグは 2-4 個必須 (カスタムフィード拾いの要)
+3. 300 字以内
+4. 絵文字は 1-3 個 (0 でも OK、多いと逆効果)
+5. 具体的な数値 / スペック (重量・容量・時間等) を最低 1 つ含める
+6. 落ち着いた語り口、煽り・情緒過多は嫌われる (エンジニア/クリエイター層)
+7. 画像があれば Alt テキストも別途生成 (アクセシビリティ文化)
+8. 毎回違う導入、定型句 NG
+`.trim();
+
+const THREADS_PREPARATION_SYSTEM_PROMPT = `
 あなたは日本語で Threads 投稿文を書く、30 代主婦「aya」のアシスタントです。
 aya は 2 児の母で、時短と効率に興味があり、優しく率直な口調で書きます。
 
@@ -143,7 +175,7 @@ ${THREADS_ALGORITHM_RULES}
 - ハッシュタグはジャンル系を 1 つだけ
 `.trim();
 
-const AFFILIATE_SYSTEM_PROMPT = `
+const THREADS_AFFILIATE_SYSTEM_PROMPT = `
 あなたは日本語で Threads 投稿文を書く、30 代主婦「aya」のアシスタントです。
 aya は 2 児の母で、時短と効率に興味があり、優しく率直な口調で書きます。
 
@@ -158,12 +190,52 @@ ${THREADS_ALGORITHM_RULES}
 - ハッシュタグは「ジャンル系 1 つ + #PR」の 2 つまで
 `.trim();
 
+const BLUESKY_PREPARATION_SYSTEM_PROMPT = `
+あなたは日本語で Bluesky 投稿文を書く、30 代主婦「aya」のアシスタントです。
+aya は 2 児の母で、時短と効率に興味があり、落ち着いた率直な口調で書きます。
+
+${BLUESKY_ALGORITHM_RULES}
+
+【準備期間モード (この投稿は商品紹介ではない)】
+- 商品名 / ブランド名 / アフィリンクを一切出さない
+- 「魂の 5 大お題」のどれか 1 つで書く
+- 実体験の感情を具体描写、でもやや理性的に (Bluesky 層は冷静派が多い)
+- 「#PR」は付けない
+- 文字数 200-300 字
+- ハッシュタグはジャンル系を 2-3 個 (カスタムフィード拾い)
+`.trim();
+
+const BLUESKY_AFFILIATE_SYSTEM_PROMPT = `
+あなたは日本語で Bluesky 投稿文を書く、30 代主婦「aya」のアシスタントです。
+aya は 2 児の母で、時短と効率に興味があり、落ち着いた率直な口調で書きます。
+
+${BLUESKY_ALGORITHM_RULES}
+
+【本投稿モード (商品紹介 + アフィリンク)】
+- 商品の具体スペック (重量・容量・時間・価格等) を最低 1 つ含める
+- **本文に URL を直接貼って OK** (Bluesky は OGP カードが綺麗に出るので推奨)
+- 「#PR」タグを必ず末尾に含める
+- 文字数 250-300 字
+- ハッシュタグは「ジャンル系 2-3 個 + #PR」で合計 3-4 個
+`.trim();
+
+function pickBasePrompt(sns: SnsKind, mode: PostMode): string {
+  if (sns === "bluesky") {
+    return mode === "preparation"
+      ? BLUESKY_PREPARATION_SYSTEM_PROMPT
+      : BLUESKY_AFFILIATE_SYSTEM_PROMPT;
+  }
+  return mode === "preparation"
+    ? THREADS_PREPARATION_SYSTEM_PROMPT
+    : THREADS_AFFILIATE_SYSTEM_PROMPT;
+}
+
 export function buildSystemPrompt(
+  sns: SnsKind,
   mode: PostMode,
   ngFlagIds: readonly NGFlagId[] = [],
 ): string {
-  const base =
-    mode === "preparation" ? PREPARATION_SYSTEM_PROMPT : AFFILIATE_SYSTEM_PROMPT;
+  const base = pickBasePrompt(sns, mode);
   if (ngFlagIds.length === 0) return base;
   const rules = ngFlagIds
     .map((id) => NG_OPTIONS[id]?.rule)
@@ -181,6 +253,7 @@ export function buildSystemPrompt(
 export function buildPreparationUserPrompt(
   topic: SoulTopicId,
   userInput: string,
+  sns: SnsKind = "threads",
 ): string {
   const t = SOUL_TOPICS[topic];
   return [
@@ -190,9 +263,8 @@ export function buildPreparationUserPrompt(
       ? `【ayaが書き留めたメモ】\n${userInput.trim()}`
       : "【ayaが書き留めたメモ】(未入力、お題に沿って全体を組み立てる)",
     "",
-    "上記お題で Threads 投稿文 1 本を生成してください。" +
-      "ayaの実体験の感情を中心に、最後は必ず会話誘発の問いかけで締めてください。" +
-      "本文には URL や商品名を含めないこと。",
+    `上記お題で ${SNS_LABELS[sns].short} 投稿文 1 本を生成してください。` +
+      "ayaの実体験の感情を中心に、本文には URL や商品名を含めないこと。",
   ].join("\n");
 }
 
@@ -203,6 +275,7 @@ export function buildAffiliateUserPrompt(params: {
   productPriceYen: number | null;
   productAffiliateUrl: string;
   userInput: string;
+  sns?: SnsKind;
 }): string {
   const {
     productTitle,
@@ -211,6 +284,7 @@ export function buildAffiliateUserPrompt(params: {
     productPriceYen,
     productAffiliateUrl,
     userInput,
+    sns = "threads",
   } = params;
   const lines: string[] = ["【商品情報】"];
   if (productTitle) lines.push(`商品名: ${productTitle}`);
@@ -226,10 +300,14 @@ export function buildAffiliateUserPrompt(params: {
     lines.push(userInput.trim());
     lines.push("");
   }
+  const urlInstruction =
+    sns === "bluesky"
+      ? "本文末尾に URL を直接貼って構いません (OGP カード化される)。"
+      : "本文に URL を含めないこと (アフィリンクはアプリが自動でリプ側に配置)。";
   lines.push(
-    "上記商品を紹介する Threads 投稿文 1 本を生成してください。" +
-      "本文に URL を含めないこと (アフィリンクはアプリが自動でリプ側に配置)。" +
-      "#PR タグを必ず含め、会話誘発の問いかけで締めてください。",
+    `上記商品を紹介する ${SNS_LABELS[sns].short} 投稿文 1 本を生成してください。` +
+      urlInstruction +
+      "#PR タグを必ず含めてください。",
   );
   return lines.join("\n");
 }
