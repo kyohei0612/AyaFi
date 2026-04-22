@@ -33,6 +33,61 @@ import {
 const NG_STORAGE_KEY = "aya-afi.ngFlags";
 const PROFILE_STORAGE_KEY = "aya-afi.profile";
 
+type SpiceOption = { value: string; label: string; hint: string };
+
+const MOOD_OPTIONS: readonly SpiceOption[] = [
+  { value: "", label: "(指定なし)", hint: "" },
+  {
+    value: "ちょっとお疲れモード",
+    label: "ちょっとお疲れモード → 親近感のあるトーン",
+    hint: "頑張りすぎていない、親近感のある投稿になります。",
+  },
+  {
+    value: "小さな発見にワクワクしてる",
+    label: "小さな発見にワクワクしてる → 純粋ポジティブ",
+    hint: "水耕栽培の芽が出た時のような、純粋でポジティブなトーンになります。",
+  },
+  {
+    value: "正直、自炊サボりたい本音",
+    label: "正直、自炊サボりたい本音 → 人間味 / 時短アフィ繋ぎ",
+    hint: "人間味が出ます。ここから時短アイテム (アフィ) に繋げると自然です。",
+  },
+  {
+    value: "しっとり、旦那さんへの感謝",
+    label: "しっとり、旦那さんへの感謝 → 温かい食卓の風景",
+    hint: "惚気すぎない、温かい食卓の風景を描写させます。",
+  },
+];
+
+const AUDIENCE_OPTIONS: readonly SpiceOption[] = [
+  { value: "", label: "(指定なし)", hint: "" },
+  {
+    value: "仕事帰りにスーパーで献立に悩んでいる人",
+    label: "献立に悩んでいる人 → 共働き夕方の悩み層",
+    hint: "忙しい共働き層に届きやすい。時短 / 料理ジャンルと相性◎",
+  },
+  {
+    value: "丁寧な暮らしに憧れるけど、現実はバタバタしている主婦",
+    label: "丁寧な暮らしに憧れる主婦 → 暮らし系フォロワー層",
+    hint: "暮らし系ハッシュタグ層に刺さりやすい。生活雑貨と相性◎",
+  },
+  {
+    value: "旦那さんともっと仲良く食卓を囲みたい新婚さん",
+    label: "新婚 / 若夫婦 → 食卓・コミュニケーション層",
+    hint: "食卓や家時間の商品に刺さる。感情寄りの文体で。",
+  },
+  {
+    value: "おうちの中に緑が欲しいけど、育てるのが苦手な人",
+    label: "観葉植物が苦手な人 → 水耕栽培・インテリア層",
+    hint: "ガーデニング初心者層に届く。水耕栽培・LED・土不要系と相性◎",
+  },
+  {
+    value: "副業や趣味の時間をあと 15 分作りたい人",
+    label: "時間が欲しい人 → 時短・効率層",
+    hint: "副業 / 趣味両立層。時短家電や効率化グッズと相性◎",
+  },
+];
+
 const PROFILE_PLACEHOLDER =
   "例 (推奨テンプレ):\n" +
   "- 旦那さんと 2 人暮らしの主婦\n" +
@@ -603,21 +658,37 @@ export default function App(): JSX.Element {
           </p>
           <label className="field">
             <span>今日の温度感</span>
-            <input
-              type="text"
+            <select
               value={spiceMood}
               onChange={(e) => setSpiceMood(e.target.value)}
-              placeholder="例: ちょっと疲れてる / ワクワクしてる / 毒を吐きたい"
-            />
+            >
+              {MOOD_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+            {(() => {
+              const hint = MOOD_OPTIONS.find((o) => o.value === spiceMood)?.hint;
+              return hint ? <span className="ng-item-hint">効果: {hint}</span> : null;
+            })()}
           </label>
           <label className="field">
             <span>ターゲットの解像度</span>
-            <input
-              type="text"
+            <select
               value={spiceAudience}
               onChange={(e) => setSpiceAudience(e.target.value)}
-              placeholder="例: 料理を楽にしたい共働き妻 / 節約に疲れた人"
-            />
+            >
+              {AUDIENCE_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+            {(() => {
+              const hint = AUDIENCE_OPTIONS.find((o) => o.value === spiceAudience)?.hint;
+              return hint ? <span className="ng-item-hint">効果: {hint}</span> : null;
+            })()}
           </label>
         </details>
       </section>
