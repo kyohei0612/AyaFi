@@ -59,7 +59,10 @@ jobs:
       - name: Build + sign Tauri bundle
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # Our key was generated with `--ci -f` (no password). If you
+          # rotate to a password-protected key, set the
+          # `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` repo secret and reference
+          # it here.
         run: pnpm tauri build
 
       - name: Extract version from tag
