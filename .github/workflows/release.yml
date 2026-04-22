@@ -1,0 +1,112 @@
+# On pushing a `v*` tag, build the Windows installer (with the bundled Python
+# sidecar), sign the updater artifacts, and publish a GitHub Release that the
+# in-app updater will fetch. The signing key for the updater lives in the
+# `TAURI_SIGNING_PRIVATE_KEY` secret — never commit it.
+#
+# To cut a release:
+#   git tag v0.1.1 && git push origin v0.1.1
+# The workflow produces:
+#   - AyaFi_<version>_x64-setup.exe (NSIS installer)
+#   - AyaFi_<version>_x64-setup.exe.sig (updater signature)
+#   - latest.json (served by GitHub as the update feed)
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up Node 20 + pnpm
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Set up Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Python deps (with optional extras for release)
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[llm,sns]" pyinstaller
+
+      - name: Install JS deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Build sidecar.exe with PyInstaller
+        run: |
+          python -m PyInstaller sidecar.spec --noconfirm
+          mkdir -p src-tauri/bin
+          cp dist/sidecar.exe src-tauri/bin/sidecar.exe
+
+      - name: Build + sign Tauri bundle
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: pnpm tauri build
+
+      - name: Extract version from tag
+        id: version
+        shell: bash
+        run: echo "v=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+
+      - name: Locate built artifacts
+        id: artifacts
+        shell: bash
+        run: |
+          setup=$(ls src-tauri/target/release/bundle/nsis/*-setup.exe | head -1)
+          sig=$(ls src-tauri/target/release/bundle/nsis/*-setup.exe.sig | head -1)
+          echo "setup=$setup" >> "$GITHUB_OUTPUT"
+          echo "sig=$sig" >> "$GITHUB_OUTPUT"
+
+      - name: Compose latest.json (updater feed)
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.v }}
+          SIG_FILE: ${{ steps.artifacts.outputs.sig }}
+          SETUP_NAME: AyaFi_${{ steps.version.outputs.v }}_x64-setup.exe
+        run: |
+          SIG=$(cat "$SIG_FILE")
+          DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          cat > latest.json <<JSON
+          {
+            "version": "$VERSION",
+            "notes": "Release v$VERSION",
+            "pub_date": "$DATE",
+            "platforms": {
+              "windows-x86_64": {
+                "signature": "$SIG",
+                "url": "https://github.com/${{ github.repository }}/releases/download/v$VERSION/$SETUP_NAME"
+              }
+            }
+          }
+          JSON
+          cp "${{ steps.artifacts.outputs.setup }}" "$SETUP_NAME"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            AyaFi_${{ steps.version.outputs.v }}_x64-setup.exe
+            ${{ steps.artifacts.outputs.sig }}
+            latest.json
+          body: |
+            Automated release for v${{ steps.version.outputs.v }}.
+            The in-app updater fetches `latest.json` from this release.

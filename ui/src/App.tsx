@@ -2,6 +2,8 @@ import { useEffect, useMemo, useState } from "react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
+import { check as checkForUpdate } from "@tauri-apps/plugin-updater";
+import { relaunch } from "@tauri-apps/plugin-process";
 
 function pathToWebviewSrc(path: string): string {
   return convertFileSrc(path);
@@ -235,25 +237,35 @@ export default function App(): JSX.Element {
   const [threadsValidation, setThreadsValidation] = useState<ValidationData | null>(null);
   const [threadsPublishResult, setThreadsPublishResult] = useState<PublishData | null>(null);
 
-  const [blueskyGenerated, setBlueskyGenerated] = useState<GenerateData | null>(null);
-  const [blueskyText, setBlueskyText] = useState<string>("");
-  const [blueskyValidation, setBlueskyValidation] = useState<ValidationData | null>(null);
-  const [blueskyPublishResult, setBlueskyPublishResult] = useState<PublishData | null>(null);
-
   useEffect(() => {
     if (threadsGenerated) {
       setThreadsText(threadsGenerated.text);
       setThreadsPublishResult(null);
     }
   }, [threadsGenerated]);
-  useEffect(() => {
-    if (blueskyGenerated) {
-      setBlueskyText(blueskyGenerated.text);
-      setBlueskyPublishResult(null);
-    }
-  }, [blueskyGenerated]);
 
-  // Auto-validate each draft on change (debounced).
+  // Check for app updates on startup (silent if no update / if endpoint
+  // unreachable in dev). When `dialog: true` is set in tauri.conf.json, the
+  // plugin shows a native confirmation dialog; if the user accepts, we
+  // download, install, then relaunch the shell so the new version runs.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const update = await checkForUpdate();
+        if (cancelled || !update) return;
+        await update.downloadAndInstall();
+        await relaunch();
+      } catch {
+        // Dev builds have no signed endpoint — this throwing is expected.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Auto-validate the Threads draft on change (debounced).
   useEffect(() => {
     if (!threadsText.trim()) {
       setThreadsValidation(null);
@@ -272,29 +284,9 @@ export default function App(): JSX.Element {
     }, 400);
     return () => clearTimeout(timer);
   }, [threadsText, mode]);
-  useEffect(() => {
-    if (!blueskyText.trim()) {
-      setBlueskyValidation(null);
-      return;
-    }
-    const timer = setTimeout(async () => {
-      try {
-        const resp = await invoke<SidecarResponse<ValidationData>>(
-          "validate_content",
-          { sns: "bluesky", mode, body: blueskyText },
-        );
-        if (resp.ok && resp.data) setBlueskyValidation(resp.data);
-      } catch {
-        /* best-effort */
-      }
-    }, 400);
-    return () => clearTimeout(timer);
-  }, [blueskyText, mode]);
 
   const threadsCharCount = useMemo(() => [...threadsText].length, [threadsText]);
-  const blueskyCharCount = useMemo(() => [...blueskyText].length, [blueskyText]);
   const threadsOverLimit = threadsCharCount > SNS_LABELS.threads.charLimit;
-  const blueskyOverLimit = blueskyCharCount > SNS_LABELS.bluesky.charLimit;
 
   const handleCopy = async (text: string, label: string): Promise<void> => {
     try {
@@ -320,9 +312,6 @@ export default function App(): JSX.Element {
 
   const handleResetThreads = (): void => {
     if (threadsGenerated) setThreadsText(threadsGenerated.text);
-  };
-  const handleResetBluesky = (): void => {
-    if (blueskyGenerated) setBlueskyText(blueskyGenerated.text);
   };
 
   const handleImagePick = async (): Promise<void> => {
@@ -458,118 +447,60 @@ export default function App(): JSX.Element {
       return;
     }
     setThreadsGenerated(null);
-    setBlueskyGenerated(null);
     setGenerating(true);
-    const [threadsResult, blueskyResult] = await Promise.allSettled([
-      generateOne("threads"),
-      generateOne("bluesky"),
-    ]);
-    if (threadsResult.status === "fulfilled" && threadsResult.value) {
-      setThreadsGenerated(threadsResult.value);
+    try {
+      const data = await generateOne("threads");
+      if (data) setThreadsGenerated(data);
+    } catch (e) {
+      setError("generate error: " + String((e as Error)?.message ?? e));
+    } finally {
+      setGenerating(false);
     }
-    if (blueskyResult.status === "fulfilled" && blueskyResult.value) {
-      setBlueskyGenerated(blueskyResult.value);
-    }
-    const errors: string[] = [];
-    if (threadsResult.status === "rejected") {
-      errors.push(String(threadsResult.reason?.message ?? threadsResult.reason));
-    }
-    if (blueskyResult.status === "rejected") {
-      errors.push(String(blueskyResult.reason?.message ?? blueskyResult.reason));
-    }
-    if (errors.length > 0) {
-      setError("generate error: " + errors.join(" / "));
-    }
-    setGenerating(false);
   };
 
   const handlePublish = async (): Promise<void> => {
-    const hasThreads = threadsText.trim().length > 0;
-    const hasBluesky = blueskyText.trim().length > 0;
-    if (!hasThreads && !hasBluesky) return;
+    if (!threadsText.trim()) return;
 
     // Threads affiliate mode: put the URL in a self-reply per ADR-012.
-    const threadsReplyBody =
-      hasThreads && mode === "affiliate" && product !== null
+    const replyBody =
+      mode === "affiliate" && product !== null
         ? `詳細はこちら👇\n${product.affiliate_url}`
         : undefined;
 
-    const previewLines: string[] = ["両 SNS に投稿します。内容を確認してください。"];
-    if (hasThreads) {
-      previewLines.push("", "── 🧵 Threads ──", threadsText);
-      if (threadsReplyBody) {
-        previewLines.push("", "(リプ) " + threadsReplyBody);
-      }
-      previewLines.push(`(${threadsCharCount} / ${SNS_LABELS.threads.charLimit} 字)`);
-    }
-    if (hasBluesky) {
-      previewLines.push("", "── 🦋 Bluesky ──", blueskyText);
-      previewLines.push(`(${blueskyCharCount} / ${SNS_LABELS.bluesky.charLimit} 字)`);
+    const previewLines: string[] = [
+      "Threads に投稿します。内容を確認してください。",
+      "",
+      threadsText,
+    ];
+    if (replyBody) {
+      previewLines.push("", "── リプライ (アフィ URL) ──", replyBody);
     }
     if (images.length > 0) {
-      previewLines.push(
-        "",
-        `画像 ${images.length} 枚を両 SNS に添付 (Threads は catbox.moe 経由でアップロード)`,
-      );
+      previewLines.push("", `画像 ${images.length} 枚を添付 (catbox.moe 経由)`);
     }
+    previewLines.push("", `${threadsCharCount} / ${SNS_LABELS.threads.charLimit} 字`);
     if (!window.confirm(previewLines.join("\n"))) return;
 
     setError("");
     setThreadsPublishResult(null);
-    setBlueskyPublishResult(null);
     setPublishing(true);
-
-    const tasks: Promise<[SnsKind, PublishData | null, string | null]>[] = [];
-    if (hasThreads) {
-      tasks.push(
-        (async () => {
-          const resp = await invoke<SidecarResponse<PublishData>>("publish_post", {
-            sns: "threads",
-            body: threadsText,
-            replyBody: threadsReplyBody,
-            imagePaths: images,
-          });
-          return [
-            "threads",
-            resp.ok && resp.data ? resp.data : null,
-            resp.ok ? null : `${resp.error?.type}: ${resp.error?.message}`,
-          ];
-        })(),
-      );
-    }
-    if (hasBluesky) {
-      tasks.push(
-        (async () => {
-          const resp = await invoke<SidecarResponse<PublishData>>("publish_post", {
-            sns: "bluesky",
-            body: blueskyText,
-            imagePaths: images,
-          });
-          return [
-            "bluesky",
-            resp.ok && resp.data ? resp.data : null,
-            resp.ok ? null : `${resp.error?.type}: ${resp.error?.message}`,
-          ];
-        })(),
-      );
-    }
-
-    const results = await Promise.allSettled(tasks);
-    const errMsgs: string[] = [];
-    for (const r of results) {
-      if (r.status === "rejected") {
-        errMsgs.push(String(r.reason?.message ?? r.reason));
-        continue;
+    try {
+      const resp = await invoke<SidecarResponse<PublishData>>("publish_post", {
+        sns: "threads",
+        body: threadsText,
+        replyBody,
+        imagePaths: images,
+      });
+      if (resp.ok && resp.data) {
+        setThreadsPublishResult(resp.data);
+      } else {
+        setError(`publish error: ${resp.error?.type}: ${resp.error?.message}`);
       }
-      const [sns, data, errMsg] = r.value;
-      if (errMsg) errMsgs.push(`${SNS_LABELS[sns].short}: ${errMsg}`);
-      if (sns === "threads") setThreadsPublishResult(data);
-      else setBlueskyPublishResult(data);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setPublishing(false);
     }
-    if (errMsgs.length > 0) {
-      setError("publish error: " + errMsgs.join(" / "));
-    }
-    setPublishing(false);
   };
 
   return (
@@ -831,10 +762,9 @@ export default function App(): JSX.Element {
         <h2>画像 (任意)</h2>
         <p className="image-hint">
           生活感のある写真は滞在時間 (A 級シグナル) を伸ばす重要要素。
-          両 SNS に同じ画像が自動添付されます (Bluesky: 最大 4 枚 / 976 KB、
-          Threads: catbox.moe 経由で最大 8 MB / 2 枚以上はカルーセル)。
+          最大 {MAX_IMAGES} 枚 / 1 枚 8 MB まで。2 枚以上はカルーセル投稿になります。
           <span className="image-note">
-            ※ Threads 側は画像が一時的に catbox.moe (匿名公開ホスト) 経由になります。
+            ※ Threads API の仕様上、画像は一時的に catbox.moe (匿名公開ホスト) 経由でアップされます。
           </span>
         </p>
         <div className="row">
@@ -888,15 +818,14 @@ export default function App(): JSX.Element {
             onClick={handleGenerate}
             disabled={generating || (mode === "affiliate" && !product)}
           >
-            {generating ? "生成中… (両 SNS 並行)" : "✨ 両 SNS 文章を生成"}
+            {generating ? "生成中…" : "✨ Threads 文章を生成"}
           </button>
           {mode === "affiliate" && !product && (
             <span className="hint-inline">先に商品情報を取得してください</span>
           )}
         </div>
         <p className="mode-hint">
-          Threads は親 URL NG / タグ 1 / 500 字。Bluesky は URL 本文 OK /
-          タグ 2-4 / 300 字。それぞれ別文章が生成されます。
+          Threads アルゴリズム: 親 URL NG / タグ 1 / 500 字。アフィ URL はアプリが自動でリプ側に配置します。
         </p>
       </section>
 
@@ -909,29 +838,14 @@ export default function App(): JSX.Element {
           charCount={threadsCharCount}
           overLimit={threadsOverLimit}
           validation={threadsValidation}
-          onCopy={() => handleCopy(threadsText, "Threads 本文")}
+          onCopy={() => handleCopy(threadsText, "本文")}
           onCopyToNote={() => handleCopyAndOpenNote(threadsText)}
           onReset={handleResetThreads}
           mode={mode}
         />
       )}
 
-      {blueskyGenerated && (
-        <DraftPanel
-          sns="bluesky"
-          generated={blueskyGenerated}
-          text={blueskyText}
-          setText={setBlueskyText}
-          charCount={blueskyCharCount}
-          overLimit={blueskyOverLimit}
-          validation={blueskyValidation}
-          onCopy={() => handleCopy(blueskyText, "Bluesky 本文")}
-          onReset={handleResetBluesky}
-          mode={mode}
-        />
-      )}
-
-      {(threadsGenerated || blueskyGenerated) && (
+      {threadsGenerated && (
         <section className="panel publish-section">
           <h2>🚀 投稿</h2>
           {copyStatus && (
@@ -946,28 +860,19 @@ export default function App(): JSX.Element {
               onClick={handlePublish}
               disabled={
                 publishing ||
-                (!threadsText.trim() && !blueskyText.trim()) ||
+                !threadsText.trim() ||
                 threadsOverLimit ||
-                blueskyOverLimit ||
-                (threadsValidation?.error_count ?? 0) > 0 ||
-                (blueskyValidation?.error_count ?? 0) > 0
+                (threadsValidation?.error_count ?? 0) > 0
               }
-              title="Threads と Bluesky に同時投稿 (画像は Bluesky のみ)"
+              title="Threads に直接投稿します"
             >
-              {publishing ? "投稿中… (両 SNS)" : "🚀 両方に投稿"}
+              {publishing ? "投稿中…" : "🚀 Threads に投稿"}
             </button>
           </div>
           {threadsPublishResult && (
             <PublishResult
               label="🧵 Threads"
               result={threadsPublishResult}
-              onError={setError}
-            />
-          )}
-          {blueskyPublishResult && (
-            <PublishResult
-              label="🦋 Bluesky"
-              result={blueskyPublishResult}
               onError={setError}
             />
           )}

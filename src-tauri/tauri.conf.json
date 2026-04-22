@@ -32,10 +32,22 @@
     }
   },
   "bundle": {
-    "active": false,
-    "targets": ["msi", "nsis"],
+    "active": true,
+    "targets": ["nsis"],
     "category": "Productivity",
     "shortDescription": "AyaFi — SNS アフィ投稿支援ツール",
-    "longDescription": "AyaFi: 妻 (aya) 向け、Threads / Bluesky / note への半自動アフィ投稿ツール"
+    "longDescription": "AyaFi: 妻 (aya) 向け、Threads / Bluesky / note への半自動アフィ投稿ツール",
+    "resources": ["bin/sidecar.exe"],
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "active": true,
+      "endpoints": [
+        "https://github.com/kyohei0612/AyaFi/releases/latest/download/latest.json"
+      ],
+      "dialog": true,
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDI1MEJGNkU3REZDOUVCRTEKUldUaDY4bmY1L1lMSlcxRnFVV1ZCY2U2cEZHTUZ5Wi9XMzZ5WngzdGh6elh6L3l5N2hMZUhrcEMK"
+    }
   }
 }

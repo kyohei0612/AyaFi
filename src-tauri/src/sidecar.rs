@@ -50,15 +50,28 @@ pub struct Sidecar {
 
 impl Sidecar {
     pub async fn spawn() -> Result<Self> {
-        let (python, script) = resolve_paths()?;
-        tracing::info!(
-            event = "sidecar_spawn_start",
-            python = %python.display(),
-            script = %script.display(),
-        );
+        let launch = resolve_paths()?;
+        let (program, args_display): (PathBuf, String) = match &launch {
+            SidecarLaunch::Frozen(path) => {
+                tracing::info!(event = "sidecar_spawn_start", mode = "frozen", path = %path.display());
+                (path.clone(), path.display().to_string())
+            }
+            SidecarLaunch::DevPython { python, script } => {
+                tracing::info!(
+                    event = "sidecar_spawn_start",
+                    mode = "dev",
+                    python = %python.display(),
+                    script = %script.display(),
+                );
+                (python.clone(), format!("{} {}", python.display(), script.display()))
+            }
+        };
 
-        let mut cmd = Command::new(&python);
-        cmd.arg(&script)
+        let mut cmd = Command::new(&program);
+        if let SidecarLaunch::DevPython { script, .. } = &launch {
+            cmd.arg(script);
+        }
+        cmd
             // Force UTF-8 for all Python I/O so Japanese text survives the pipe
             // regardless of the Windows system codepage (cp932 default).
             .env("PYTHONUTF8", "1")
@@ -68,9 +81,9 @@ impl Sidecar {
             .stderr(Stdio::piped())
             .kill_on_drop(true);
 
-        let mut child = cmd.spawn().with_context(|| {
-            format!("failed to spawn {} {}", python.display(), script.display())
-        })?;
+        let mut child = cmd
+            .spawn()
+            .with_context(|| format!("failed to spawn {}", args_display))?;
         let stdout = child
             .stdout
             .take()
@@ -192,29 +205,50 @@ async fn handle_stdout_line(pending: &Arc<Mutex<PendingMap>>, line: &str) {
     tracing::warn!(event = "sidecar_unclassified_message", line);
 }
 
-fn resolve_paths() -> Result<(PathBuf, PathBuf)> {
-    // Dev layout: C:\...\src-tauri\target\debug\aya-afi.exe
-    //   → project root is 3 levels up.
-    // TODO Stage 6: detect frozen bundle and use `sys._MEIPASS`-equivalent path.
+/// What kind of sidecar is being launched — used to decide whether we pass a
+/// ``script.py`` argument (dev) or just run the frozen ``sidecar.exe`` binary.
+pub enum SidecarLaunch {
+    Frozen(PathBuf),
+    DevPython { python: PathBuf, script: PathBuf },
+}
+
+fn resolve_paths() -> Result<SidecarLaunch> {
     let exe = std::env::current_exe().context("current_exe unavailable")?;
-    let root = exe
+    let exe_dir = exe
         .parent()
-        .and_then(|p| p.parent())
+        .ok_or_else(|| anyhow!("cannot derive parent of {}", exe.display()))?;
+
+    // Release / bundled layout. Tauri's bundler places declared resources
+    // under a `resources/` subdir next to the installed exe on Windows.
+    for candidate in [
+        exe_dir.join("sidecar.exe"),
+        exe_dir.join("resources").join("bin").join("sidecar.exe"),
+        exe_dir.join("resources").join("sidecar.exe"),
+    ] {
+        if candidate.is_file() {
+            return Ok(SidecarLaunch::Frozen(candidate));
+        }
+    }
+
+    // Dev layout: C:\...\src-tauri\target\debug\aya-afi.exe → root is 3 up.
+    let root = exe_dir
+        .parent()
         .and_then(|p| p.parent())
         .and_then(|p| p.parent())
         .ok_or_else(|| anyhow!("cannot derive project root from {}", exe.display()))?;
 
     let python = root.join(".venv").join("Scripts").join("python.exe");
     let script = root.join("scripts").join("sidecar.py");
-
     if !python.exists() {
         return Err(anyhow!(
-            "Python interpreter not found at {} (run `uv venv` then `uv pip install -e .`)",
-            python.display()
+            "Python interpreter not found at {} (run `uv venv` then `uv pip install -e .`) \
+             and no frozen sidecar.exe next to {}",
+            python.display(),
+            exe.display()
         ));
     }
     if !script.exists() {
         return Err(anyhow!("Sidecar script not found at {}", script.display()));
     }
-    Ok((python, script))
+    Ok(SidecarLaunch::DevPython { python, script })
 }

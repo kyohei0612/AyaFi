@@ -18,8 +18,16 @@ dist/
 build/
 
 # PyInstaller
+# Don't ignore the sidecar spec — it's tracked on purpose.
 *.spec
 !*.template.spec
+!sidecar.spec
+
+# Staged sidecar binaries (built locally, installed via CI for release)
+src-tauri/bin/
+
+# Tauri signing keys (private key MUST NOT be committed)
+.tauri-keys/
 
 # Node / Frontend
 node_modules/
