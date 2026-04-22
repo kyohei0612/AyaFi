@@ -88,6 +88,21 @@ const AUDIENCE_OPTIONS: readonly SpiceOption[] = [
   },
 ];
 
+// お題ごとのメモ placeholder。立派な文章より「スマホ走り書きの生データ」
+// を投げ込むほうが LLM は具体的なエピソードを拾いやすい。
+const PREP_MEMO_HINTS: Record<SoulTopicId, string> = {
+  regret:
+    "例: 安物買いして旦那に苦笑いされたエピソード / 勢いで買った 3000 円の傘が結局お蔵入り",
+  surprise:
+    "例: 当たり前だと思ってた家事の常識が、実は最新家電で秒で終わった話",
+  small_hack:
+    "例: 疲れてる日、旦那さんと 2 人で『手抜き最高』って笑い合ったズボラ術",
+  fail:
+    "例: 水耕栽培に夢中になりすぎて、夕飯のメインを焦がした話",
+  seasonal:
+    "例: 窓を開けた時の匂いで、去年 2 人で旅行した時のこと思い出した",
+};
+
 const PROFILE_PLACEHOLDER =
   "例 (推奨テンプレ):\n" +
   "- 旦那さんと 2 人暮らしの主婦\n" +
@@ -795,12 +810,14 @@ export default function App(): JSX.Element {
           </div>
           <p className="mode-hint">{SOUL_TOPICS[soulTopic].hint}</p>
           <label className="field">
-            <span>ayaのメモ (具体シーン / 感情 / 失敗など、箇条書きで OK)</span>
+            <span>
+              ayaのメモ — 立派な文章より「スマホ走り書きの生データ」を投げ込む方が刺さります
+            </span>
             <textarea
               rows={4}
               value={prepMemo}
               onChange={(e) => setPrepMemo(e.target.value)}
-              placeholder="例: 3000円で買った折りたたみ傘、結局 2 回使ってお蔵入り..."
+              placeholder={PREP_MEMO_HINTS[soulTopic]}
             />
           </label>
         </section>
