@@ -75,6 +75,99 @@ async def test_dry_run_with_reply_returns_both_ids() -> None:
     assert result.reply_post_id is not None
 
 
+async def test_publish_with_single_image(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    img = tmp_path / "pic.jpg"
+    img.write_bytes(b"\xff\xd8\xff\xe0")
+
+    # Stub upload_image so we don't hit catbox from tests.
+    async def fake_upload(path: str) -> str:
+        return f"https://files.catbox.moe/{path.split('/')[-1]}"
+
+    monkeypatch.setattr("aya_afi.poster.threads.upload_image", fake_upload)
+
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        idx = len(calls)
+        if idx == 1:
+            return httpx.Response(200, json={"id": "container-1"})
+        if idx == 2:
+            return httpx.Response(200, json={"id": "post-1"})
+        return httpx.Response(200, json={"permalink": "https://www.threads.net/@u/post/1"})
+
+    transport = httpx.MockTransport(handler)
+    orig_init = httpx.AsyncClient.__init__
+
+    def patched(self: httpx.AsyncClient, *args: Any, **kwargs: Any) -> None:
+        kwargs["transport"] = transport
+        orig_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(httpx.AsyncClient, "__init__", patched)
+
+    result = await _poster().publish(_req(image_paths=[str(img)]))
+    assert result.success is True
+
+    # First call must be IMAGE container with image_url set.
+    create_url = str(calls[0].url)
+    assert "media_type=IMAGE" in create_url
+    assert "image_url=" in create_url
+    assert "files.catbox.moe" in create_url
+
+
+async def test_publish_with_carousel(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    img_a = tmp_path / "a.jpg"
+    img_b = tmp_path / "b.jpg"
+    img_a.write_bytes(b"A")
+    img_b.write_bytes(b"B")
+
+    async def fake_upload(path: str) -> str:
+        return f"https://files.catbox.moe/{path.split('/')[-1]}"
+
+    monkeypatch.setattr("aya_afi.poster.threads.upload_image", fake_upload)
+
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        idx = len(calls)
+        # Expected sequence:
+        #   1. IMAGE item (is_carousel_item=true) for img_a
+        #   2. IMAGE item (is_carousel_item=true) for img_b
+        #   3. CAROUSEL container
+        #   4. threads_publish
+        #   5. permalink GET
+        if idx == 1:
+            return httpx.Response(200, json={"id": "item-A"})
+        if idx == 2:
+            return httpx.Response(200, json={"id": "item-B"})
+        if idx == 3:
+            return httpx.Response(200, json={"id": "carousel-1"})
+        if idx == 4:
+            return httpx.Response(200, json={"id": "post-1"})
+        return httpx.Response(200, json={"permalink": "https://www.threads.net/@u/post/c"})
+
+    transport = httpx.MockTransport(handler)
+    orig_init = httpx.AsyncClient.__init__
+
+    def patched(self: httpx.AsyncClient, *args: Any, **kwargs: Any) -> None:
+        kwargs["transport"] = transport
+        orig_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(httpx.AsyncClient, "__init__", patched)
+
+    result = await _poster().publish(_req(image_paths=[str(img_a), str(img_b)]))
+    assert result.success is True
+    assert "is_carousel_item=true" in str(calls[0].url)
+    assert "is_carousel_item=true" in str(calls[1].url)
+    assert "media_type=CAROUSEL" in str(calls[2].url)
+    assert "children=item-A%2Citem-B" in str(calls[2].url)
+
+
 async def test_publish_text_only_success(monkeypatch: pytest.MonkeyPatch) -> None:
     _install_mock(
         monkeypatch,

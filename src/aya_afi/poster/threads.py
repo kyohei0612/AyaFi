@@ -1,12 +1,17 @@
-"""Threads (Meta Graph API) poster — real implementation (Stage 3.a).
+"""Threads (Meta Graph API) poster — real implementation (Stage 3.a + 3.c).
 
 2-step posting design (ADR-012 §2):
-    1. Create parent-post container (body only, NO URL)
+    1. Create parent-post container (body only, NO URL) + optional images
     2. Publish parent → parent_id
     3. If reply_body: create reply container (reply_to_id=parent_id)
     4. Publish reply (affiliate URL lives here)
 
-Text-only for now; image attachment lands in Stage 3.c.
+Images: Threads' Graph API only accepts public HTTPS image URLs, not direct
+binary uploads. We first upload each local file via ``image_host`` (catbox
+.moe), then reference the returned URLs. Single images use
+``media_type=IMAGE``; 2+ images use the carousel flow (each item created
+with ``is_carousel_item=true``, then a ``CAROUSEL`` container aggregates
+them).
 """
 
 from __future__ import annotations
@@ -24,6 +29,7 @@ from aya_afi.poster.errors import (
     PosterRateLimitError,
     PosterValidationError,
 )
+from aya_afi.poster.image_host import upload_image
 
 _log = logging.getLogger("aya_afi.poster.threads")
 
@@ -49,12 +55,19 @@ class ThreadsPoster:
         if req.dry_run:
             return self._dry_run_result(req)
 
+        image_urls: list[str] = []
+        if req.image_paths:
+            for p in req.image_paths:
+                image_urls.append(await upload_image(p))
+
         async with httpx.AsyncClient(timeout=_REQUEST_TIMEOUT_SEC) as client:
-            parent_id = await self._create_and_publish(client, req.body, reply_to_id=None)
+            parent_id = await self._create_and_publish(
+                client, req.body, reply_to_id=None, image_urls=image_urls
+            )
             reply_id: str | None = None
             if req.reply_body:
                 reply_id = await self._create_and_publish(
-                    client, req.reply_body, reply_to_id=parent_id
+                    client, req.reply_body, reply_to_id=parent_id, image_urls=[]
                 )
             permalink = await self._fetch_permalink(client, parent_id)
 
@@ -80,30 +93,110 @@ class ThreadsPoster:
         client: httpx.AsyncClient,
         text: str,
         reply_to_id: str | None,
+        image_urls: list[str],
     ) -> str:
-        """Step 1+2 of the Threads posting flow. Returns the published post id."""
+        """Step 1+2 of the Threads posting flow. Returns the published post id.
+
+        Dispatches on image count:
+            - 0: text-only container (``media_type=TEXT``)
+            - 1: single-image container (``media_type=IMAGE``)
+            - 2+: carousel (per-image IMAGE items, then a CAROUSEL wrapper)
+        """
         # Meta parses #tag server-side but only for half-width `#`; LLM output
         # commonly mixes full-width `＃`, so normalize before sending.
         normalized = text.replace("\uff03", "#")
-        create_params: dict[str, str] = {
-            "media_type": "TEXT",
-            "text": normalized,
-            "access_token": self._access_token,
-        }
-        if reply_to_id is not None:
-            create_params["reply_to_id"] = reply_to_id
 
-        create_resp = await client.post(
-            f"{GRAPH_API_BASE}/{self._user_id}/threads",
-            params=create_params,
-        )
-        container_id = _parse_or_raise(create_resp, field="id", step="create_container")
+        if not image_urls:
+            container_id = await self._create_text_container(
+                client, normalized, reply_to_id
+            )
+        elif len(image_urls) == 1:
+            container_id = await self._create_image_container(
+                client, normalized, image_urls[0], reply_to_id
+            )
+        else:
+            container_id = await self._create_carousel_container(
+                client, normalized, image_urls, reply_to_id
+            )
 
         publish_resp = await client.post(
             f"{GRAPH_API_BASE}/{self._user_id}/threads_publish",
             params={"creation_id": container_id, "access_token": self._access_token},
         )
         return _parse_or_raise(publish_resp, field="id", step="publish")
+
+    async def _create_text_container(
+        self,
+        client: httpx.AsyncClient,
+        text: str,
+        reply_to_id: str | None,
+    ) -> str:
+        params: dict[str, str] = {
+            "media_type": "TEXT",
+            "text": text,
+            "access_token": self._access_token,
+        }
+        if reply_to_id is not None:
+            params["reply_to_id"] = reply_to_id
+        resp = await client.post(
+            f"{GRAPH_API_BASE}/{self._user_id}/threads", params=params
+        )
+        return _parse_or_raise(resp, field="id", step="create_container")
+
+    async def _create_image_container(
+        self,
+        client: httpx.AsyncClient,
+        text: str,
+        image_url: str,
+        reply_to_id: str | None,
+    ) -> str:
+        params: dict[str, str] = {
+            "media_type": "IMAGE",
+            "image_url": image_url,
+            "text": text,
+            "access_token": self._access_token,
+        }
+        if reply_to_id is not None:
+            params["reply_to_id"] = reply_to_id
+        resp = await client.post(
+            f"{GRAPH_API_BASE}/{self._user_id}/threads", params=params
+        )
+        return _parse_or_raise(resp, field="id", step="create_image_container")
+
+    async def _create_carousel_container(
+        self,
+        client: httpx.AsyncClient,
+        text: str,
+        image_urls: list[str],
+        reply_to_id: str | None,
+    ) -> str:
+        item_ids: list[str] = []
+        for url in image_urls:
+            resp = await client.post(
+                f"{GRAPH_API_BASE}/{self._user_id}/threads",
+                params={
+                    "media_type": "IMAGE",
+                    "image_url": url,
+                    "is_carousel_item": "true",
+                    "access_token": self._access_token,
+                },
+            )
+            item_ids.append(
+                _parse_or_raise(resp, field="id", step="create_carousel_item")
+            )
+
+        params: dict[str, str] = {
+            "media_type": "CAROUSEL",
+            "children": ",".join(item_ids),
+            "text": text,
+            "access_token": self._access_token,
+        }
+        if reply_to_id is not None:
+            params["reply_to_id"] = reply_to_id
+        resp = await client.post(
+            f"{GRAPH_API_BASE}/{self._user_id}/threads", params=params
+        )
+        return _parse_or_raise(resp, field="id", step="create_carousel_container")
 
     async def _fetch_permalink(self, client: httpx.AsyncClient, post_id: str) -> str | None:
         """Best-effort: fetch the public permalink. Failure does NOT fail the post."""

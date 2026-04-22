@@ -509,7 +509,7 @@ export default function App(): JSX.Element {
     if (images.length > 0) {
       previewLines.push(
         "",
-        `画像 ${images.length} 枚を Bluesky に添付 (Threads API は直接アップ不可、手動追加してください)`,
+        `画像 ${images.length} 枚を両 SNS に添付 (Threads は catbox.moe 経由でアップロード)`,
       );
     }
     if (!window.confirm(previewLines.join("\n"))) return;
@@ -527,7 +527,7 @@ export default function App(): JSX.Element {
             sns: "threads",
             body: threadsText,
             replyBody: threadsReplyBody,
-            imagePaths: [],
+            imagePaths: images,
           });
           return [
             "threads",
@@ -831,9 +831,10 @@ export default function App(): JSX.Element {
         <h2>画像 (任意)</h2>
         <p className="image-hint">
           生活感のある写真は滞在時間 (A 級シグナル) を伸ばす重要要素。
-          Bluesky は最大 4 枚 / 1 枚 976 KB まで実投稿に添付されます。
+          両 SNS に同じ画像が自動添付されます (Bluesky: 最大 4 枚 / 976 KB、
+          Threads: catbox.moe 経由で最大 8 MB / 2 枚以上はカルーセル)。
           <span className="image-note">
-            ※ Threads API は画像の直接アップロード非対応のため、投稿後に Threads アプリから手動追加してください。
+            ※ Threads 側は画像が一時的に catbox.moe (匿名公開ホスト) 経由になります。
           </span>
         </p>
         <div className="row">
