@@ -97,6 +97,8 @@ class Settings(BaseSettings):
     moshimo_amazon_pl_id: str | None = Field(default=None)
 
     # --- SNS posting (Stage 3) ---
+    threads_app_id: str | None = Field(default=None)
+    threads_app_secret: str | None = Field(default=None)
     threads_access_token: str | None = Field(default=None)
     threads_user_id: str | None = Field(default=None)
     bluesky_handle: str | None = Field(default=None)
