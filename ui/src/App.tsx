@@ -34,12 +34,12 @@ const NG_STORAGE_KEY = "aya-afi.ngFlags";
 const PROFILE_STORAGE_KEY = "aya-afi.profile";
 
 const PROFILE_PLACEHOLDER =
-  "例:\n" +
-  "- 30 代前半、都内在住\n" +
-  "- 夫婦 2 人暮らし、子どもなし (将来も予定なし)\n" +
-  "- フルタイムで事務職、通勤 1 時間\n" +
-  "- 週末は夫と喫茶店めぐり、ミニマリスト志向\n" +
-  "- 猫を飼っている (キジトラ、7 歳)";
+  "例 (推奨テンプレ):\n" +
+  "- 旦那さんと 2 人暮らしの主婦\n" +
+  "- 水耕栽培や料理など、日々の「小さな幸せ」を大切にしている\n" +
+  "- 文章は柔らかく、読んだ人が「ほっこり」するような温度感を意識\n" +
+  "- アフィ時も「売り込み」ではなく「暮らしの共有」として書くスタンス\n" +
+  "- ギラついた表現・断定的な推奨・AI 特有の「〜をご紹介します」は避ける";
 
 function loadProfile(): string {
   try {
@@ -208,6 +208,12 @@ export default function App(): JSX.Element {
     pickRandomTopic(),
   );
   const [prepMemo, setPrepMemo] = useState<string>("");
+
+  // Optional "spice" inputs — bias the tone without full prompt-engineering.
+  // Left empty by default; if aya fills them in they get injected into the
+  // user prompt so the LLM can color the draft accordingly.
+  const [spiceMood, setSpiceMood] = useState<string>("");
+  const [spiceAudience, setSpiceAudience] = useState<string>("");
 
   // Affiliate mode state
   const [productUrl, setProductUrl] = useState<string>("");
@@ -407,10 +413,11 @@ export default function App(): JSX.Element {
 
   const buildPromptsFor = (sns: SnsKind): { system: string; user: string } => {
     const ngList = [...ngFlags];
+    const spice = { mood: spiceMood, audience: spiceAudience };
     if (mode === "preparation") {
       return {
         system: buildSystemPrompt(sns, "preparation", ngList, profile),
-        user: buildPreparationUserPrompt(soulTopic, prepMemo, sns),
+        user: buildPreparationUserPrompt(soulTopic, prepMemo, sns, spice),
       };
     }
     if (!product) throw new Error("本投稿モードでは、先に商品情報を取得してください。");
@@ -424,6 +431,7 @@ export default function App(): JSX.Element {
         productAffiliateUrl: product.affiliate_url,
         userInput: affMemo,
         sns,
+        spice,
       }),
     };
   };
@@ -574,6 +582,43 @@ export default function App(): JSX.Element {
               <span className="copy-status">{profileSavedAt}</span>
             )}
           </div>
+        </details>
+      </section>
+
+      <section className="panel profile-panel">
+        <details>
+          <summary>
+            <span className="ng-title">スパイス (任意)</span>
+            {(spiceMood.trim() || spiceAudience.trim()) ? (
+              <span className="ng-badge">設定中</span>
+            ) : (
+              <span className="ng-badge-empty">未設定</span>
+            )}
+            <span className="ng-caret" aria-hidden="true">
+              ▾
+            </span>
+          </summary>
+          <p className="ng-hint">
+            今日の気分や投稿ターゲットを書くと、トーンが寄ります。空欄でも OK。
+          </p>
+          <label className="field">
+            <span>今日の温度感</span>
+            <input
+              type="text"
+              value={spiceMood}
+              onChange={(e) => setSpiceMood(e.target.value)}
+              placeholder="例: ちょっと疲れてる / ワクワクしてる / 毒を吐きたい"
+            />
+          </label>
+          <label className="field">
+            <span>ターゲットの解像度</span>
+            <input
+              type="text"
+              value={spiceAudience}
+              onChange={(e) => setSpiceAudience(e.target.value)}
+              placeholder="例: 料理を楽にしたい共働き妻 / 節約に疲れた人"
+            />
+          </label>
         </details>
       </section>
 
