@@ -93,6 +93,16 @@ type ValidationData = {
   issues: ValidationIssue[];
 };
 
+type PublishData = {
+  success: boolean;
+  sns: string;
+  sns_post_id: string | null;
+  sns_post_url: string | null;
+  reply_post_id: string | null;
+  error_type: string | null;
+  error_message: string | null;
+};
+
 const WEEKDAY_JA = ["日", "月", "火", "水", "木", "金", "土"] as const;
 
 function buildGreeting(now: Date, suggestedMode: PostMode): {
@@ -174,11 +184,14 @@ export default function App(): JSX.Element {
   const [copyStatus, setCopyStatus] = useState<string>("");
   const [error, setError] = useState<string>("");
   const [validation, setValidation] = useState<ValidationData | null>(null);
+  const [publishing, setPublishing] = useState<boolean>(false);
+  const [publishResult, setPublishResult] = useState<PublishData | null>(null);
 
   useEffect(() => {
     if (generated) {
       setEditedText(generated.text);
       setCopyStatus("");
+      setPublishResult(null);
     }
   }, [generated]);
 
@@ -327,6 +340,34 @@ export default function App(): JSX.Element {
       setError(String(e));
     } finally {
       setFetching(false);
+    }
+  };
+
+  const handlePublish = async (): Promise<void> => {
+    if (sns !== "bluesky") return;
+    const ok = window.confirm(
+      `Bluesky に投稿します。内容を確認してください。\n\n${editedText}\n\n---\n${charCount} / ${charLimit} 字`,
+    );
+    if (!ok) return;
+    try {
+      setError("");
+      setPublishResult(null);
+      setPublishing(true);
+      const resp = await invoke<SidecarResponse<PublishData>>("publish_post", {
+        sns,
+        body: editedText,
+      });
+      if (resp.ok && resp.data) {
+        setPublishResult(resp.data);
+      } else {
+        setError(
+          `publish error: ${resp.error?.type}: ${resp.error?.message}`,
+        );
+      }
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setPublishing(false);
     }
   };
 
@@ -692,6 +733,27 @@ export default function App(): JSX.Element {
               >
                 📝 note にコピー & 開く
               </button>
+              {sns === "bluesky" && (
+                <button
+                  type="button"
+                  className="btn-primary"
+                  onClick={handlePublish}
+                  disabled={
+                    publishing ||
+                    !editedText.trim() ||
+                    overLimit ||
+                    (validation?.error_count ?? 0) > 0
+                  }
+                  title="Bluesky に直接投稿します"
+                >
+                  {publishing ? "投稿中…" : "🦋 Bluesky に投稿"}
+                </button>
+              )}
+              {sns === "threads" && (
+                <span className="hint-inline">
+                  Threads 直接投稿は Stage 3.a 待ち (現状は手動コピー運用)
+                </span>
+              )}
               <button type="button" onClick={handleResetText}>
                 ↺ 元に戻す
               </button>
@@ -701,6 +763,23 @@ export default function App(): JSX.Element {
               </span>
               {copyStatus && <span className="copy-status">{copyStatus}</span>}
             </div>
+            {publishResult && publishResult.success && (
+              <div className="output publish-success">
+                <span className="val-check">✓</span> 投稿成功！
+                {publishResult.sns_post_url && (
+                  <>
+                    {" "}
+                    <a
+                      href={publishResult.sns_post_url}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      投稿を開く
+                    </a>
+                  </>
+                )}
+              </div>
+            )}
             {validation && <ValidationPanel validation={validation} />}
             <div className="post-hint">
               {mode === "affiliate"

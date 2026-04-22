@@ -89,6 +89,37 @@ pub async fn generate_post(
         .map_err(|e| e.to_string())
 }
 
+/// Publish a generated post to the chosen SNS (Stage 3.b).
+#[tauri::command]
+#[allow(non_snake_case)]
+pub async fn publish_post(
+    sidecar: State<'_, Sidecar>,
+    sns: String,
+    body: String,
+    replyBody: Option<String>,
+    imagePaths: Option<Vec<String>>,
+    dryRun: Option<bool>,
+) -> Result<Value, String> {
+    tracing::info!(
+        event = "cmd_publish_post",
+        sns = %sns,
+        char_count = body.chars().count(),
+    );
+    let mut params = json!({
+        "sns": sns,
+        "body": body,
+        "image_paths": imagePaths.unwrap_or_default(),
+        "dry_run": dryRun.unwrap_or(false),
+    });
+    if let Some(r) = replyBody {
+        params["reply_body"] = Value::String(r);
+    }
+    sidecar
+        .send_request("publish_post", params, 30.0)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// Open the log directory in the OS file explorer (ADR-008).
 #[tauri::command]
 pub fn open_logs_dir(app: tauri::AppHandle) -> Result<(), String> {

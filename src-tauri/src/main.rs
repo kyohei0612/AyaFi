@@ -24,6 +24,7 @@ fn main() {
             commands::fetch_product,
             commands::generate_post,
             commands::validate_content,
+            commands::publish_post,
             commands::open_logs_dir,
             commands::open_note_compose,
         ])

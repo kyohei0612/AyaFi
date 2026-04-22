@@ -36,6 +36,7 @@ from aya_afi.ipc.handlers import (
     handle_validate_content,
     make_fetch_product_handler,
     make_generate_post_handler,
+    make_publish_post_handler,
 )
 from aya_afi.ipc.protocol import (
     SCHEMA_VERSION,
@@ -54,6 +55,12 @@ from aya_afi.llm.errors import (
     LLMValidationError,
 )
 from aya_afi.llm.factory import create_provider
+from aya_afi.poster.errors import (
+    PosterAPIError,
+    PosterAuthError,
+    PosterConfigError,
+    PosterRateLimitError,
+)
 from aya_afi.utils.logging import setup_logging
 
 WriterFn = Callable[[str], None]
@@ -195,7 +202,17 @@ def _classify_exception(e: Exception) -> ErrorInfo:
         return ErrorInfo(type="product_not_found", message=str(e))
     if isinstance(e, AffiliateConfigError):
         return ErrorInfo(type="affiliate_config", message=str(e))
-    if isinstance(e, AffiliateAPIError | LLMAPIError):
+    if isinstance(e, PosterAuthError):
+        return ErrorInfo(type="poster_auth", message=str(e))
+    if isinstance(e, PosterRateLimitError):
+        return ErrorInfo(
+            type="rate_limit",
+            message=str(e),
+            retry_after_sec=e.retry_after_sec,
+        )
+    if isinstance(e, PosterConfigError):
+        return ErrorInfo(type="poster_config", message=str(e))
+    if isinstance(e, AffiliateAPIError | LLMAPIError | PosterAPIError):
         return ErrorInfo(type="api_down", message=str(e))
     return ErrorInfo(type="internal", message=str(e))
 
@@ -241,6 +258,7 @@ def main() -> int:
     server.register(RequestAction.fetch_product, make_fetch_product_handler(settings))
     server.register(RequestAction.generate_post, make_generate_post_handler(llm))
     server.register(RequestAction.validate_content, handle_validate_content)
+    server.register(RequestAction.publish_post, make_publish_post_handler(settings))
 
     try:
         asyncio.run(server.run())

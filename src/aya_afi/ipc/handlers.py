@@ -6,6 +6,7 @@ isolation with a mock LLM or other test double.
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Awaitable, Callable
 
 from aya_afi.affiliate.factory import create_provider_for_url
@@ -16,12 +17,16 @@ from aya_afi.ipc.protocol import (
     FetchProductResult,
     GeneratePostParams,
     GeneratePostResult,
+    PublishPostParams,
+    PublishPostResult,
     Request,
     ValidateContentParams,
     ValidateContentResult,
     ValidationIssueDto,
 )
 from aya_afi.llm.base import GenerationRequest, LLMProvider
+from aya_afi.poster.base import PostRequest
+from aya_afi.poster.factory import create_poster
 from aya_afi.sns_engine.base import PostMode, SnsKind
 from aya_afi.sns_engine.validators import validate_bluesky_post, validate_threads_post
 
@@ -95,6 +100,35 @@ async def handle_validate_content(req: Request) -> dict[str, object]:
         ],
     )
     return result.model_dump()
+
+
+def make_publish_post_handler(settings: Settings) -> HandlerFn:
+    """Return a handler that publishes a post to the chosen SNS (Stage 3.b)."""
+
+    async def handle(req: Request) -> dict[str, object]:
+        params = PublishPostParams.model_validate(req.params)
+        sns = SnsKind(params.sns)
+        poster = create_poster(sns, settings)
+        post_req = PostRequest(
+            sns=sns,
+            body=params.body,
+            reply_body=params.reply_body,
+            image_paths=params.image_paths,
+            idempotency_key=str(uuid.uuid4()),
+            dry_run=params.dry_run or settings.dry_run,
+        )
+        post_result = await poster.publish(post_req)
+        return PublishPostResult(
+            success=post_result.success,
+            sns=post_result.sns.value,
+            sns_post_id=post_result.sns_post_id,
+            sns_post_url=post_result.sns_post_url,
+            reply_post_id=post_result.reply_post_id,
+            error_type=post_result.error_type,
+            error_message=post_result.error_message,
+        ).model_dump()
+
+    return handle
 
 
 def make_generate_post_handler(llm: LLMProvider) -> HandlerFn:

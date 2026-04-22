@@ -29,6 +29,7 @@ class RequestAction(StrEnum):
     fetch_product = "fetch_product"
     generate_post = "generate_post"
     validate_content = "validate_content"
+    publish_post = "publish_post"
     publish = "publish"
     list_drafts = "list_drafts"
 
@@ -194,3 +195,32 @@ class ValidateContentResult(BaseModel):
     error_count: int = Field(ge=0)
     warning_count: int = Field(ge=0)
     issues: list[ValidationIssueDto] = Field(default_factory=list)
+
+
+class PublishPostParams(BaseModel):
+    """Params for ``RequestAction.publish_post`` (Stage 3.b)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    sns: str
+    body: str = Field(..., min_length=1)
+    reply_body: str | None = Field(
+        default=None,
+        description="Threads 2-step posting: URL-bearing self-reply body.",
+    )
+    image_paths: list[str] = Field(default_factory=list)
+    dry_run: bool = False
+
+
+class PublishPostResult(BaseModel):
+    """Response.data shape for ``RequestAction.publish_post``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    success: bool
+    sns: str
+    sns_post_id: str | None = None
+    sns_post_url: str | None = None
+    reply_post_id: str | None = None
+    error_type: str | None = None
+    error_message: str | None = None
