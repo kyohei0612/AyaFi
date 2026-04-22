@@ -165,8 +165,6 @@ export default function App(): JSX.Element {
   const suggestedMode = useMemo(() => suggestModeForDate(now), [now]);
   const hero = useMemo(() => buildGreeting(now, suggestedMode), [now, suggestedMode]);
   const [mode, setMode] = useState<PostMode>(suggestedMode);
-  const [sns, setSns] = useState<SnsKind>("threads");
-  const charLimit = SNS_LABELS[sns].charLimit;
 
   // Profile — ayaさんの具体プロフィール (family/age/job/location/lifestyle).
   // Feeds into every generation's system prompt so the LLM stops inventing
@@ -223,65 +221,95 @@ export default function App(): JSX.Element {
     [images],
   );
 
-  // Common
+  // Generation + publication are now run in parallel for both SNS at once
+  // (per user flow: "one generate button, one publish button, two edited
+  // texts"). Each SNS has its own draft + validation so char limits and tag
+  // conventions are enforced independently.
   const [generating, setGenerating] = useState<boolean>(false);
-  const [generated, setGenerated] = useState<GenerateData | null>(null);
-  // Editable version of the generated text. Resets when ``generated`` changes.
-  const [editedText, setEditedText] = useState<string>("");
+  const [publishing, setPublishing] = useState<boolean>(false);
   const [copyStatus, setCopyStatus] = useState<string>("");
   const [error, setError] = useState<string>("");
-  const [validation, setValidation] = useState<ValidationData | null>(null);
-  const [publishing, setPublishing] = useState<boolean>(false);
-  const [publishResult, setPublishResult] = useState<PublishData | null>(null);
+
+  const [threadsGenerated, setThreadsGenerated] = useState<GenerateData | null>(null);
+  const [threadsText, setThreadsText] = useState<string>("");
+  const [threadsValidation, setThreadsValidation] = useState<ValidationData | null>(null);
+  const [threadsPublishResult, setThreadsPublishResult] = useState<PublishData | null>(null);
+
+  const [blueskyGenerated, setBlueskyGenerated] = useState<GenerateData | null>(null);
+  const [blueskyText, setBlueskyText] = useState<string>("");
+  const [blueskyValidation, setBlueskyValidation] = useState<ValidationData | null>(null);
+  const [blueskyPublishResult, setBlueskyPublishResult] = useState<PublishData | null>(null);
 
   useEffect(() => {
-    if (generated) {
-      setEditedText(generated.text);
-      setCopyStatus("");
-      setPublishResult(null);
+    if (threadsGenerated) {
+      setThreadsText(threadsGenerated.text);
+      setThreadsPublishResult(null);
     }
-  }, [generated]);
-
-  // Auto-validate on text change (debounced). Threads + Bluesky supported.
+  }, [threadsGenerated]);
   useEffect(() => {
-    if (!editedText.trim()) {
-      setValidation(null);
+    if (blueskyGenerated) {
+      setBlueskyText(blueskyGenerated.text);
+      setBlueskyPublishResult(null);
+    }
+  }, [blueskyGenerated]);
+
+  // Auto-validate each draft on change (debounced).
+  useEffect(() => {
+    if (!threadsText.trim()) {
+      setThreadsValidation(null);
       return;
     }
     const timer = setTimeout(async () => {
       try {
         const resp = await invoke<SidecarResponse<ValidationData>>(
           "validate_content",
-          { sns, mode, body: editedText },
+          { sns: "threads", mode, body: threadsText },
         );
-        if (resp.ok && resp.data) setValidation(resp.data);
+        if (resp.ok && resp.data) setThreadsValidation(resp.data);
       } catch {
-        // Best-effort: a validation failure should not block the UI.
+        /* best-effort */
       }
     }, 400);
     return () => clearTimeout(timer);
-  }, [editedText, mode, sns]);
+  }, [threadsText, mode]);
+  useEffect(() => {
+    if (!blueskyText.trim()) {
+      setBlueskyValidation(null);
+      return;
+    }
+    const timer = setTimeout(async () => {
+      try {
+        const resp = await invoke<SidecarResponse<ValidationData>>(
+          "validate_content",
+          { sns: "bluesky", mode, body: blueskyText },
+        );
+        if (resp.ok && resp.data) setBlueskyValidation(resp.data);
+      } catch {
+        /* best-effort */
+      }
+    }, 400);
+    return () => clearTimeout(timer);
+  }, [blueskyText, mode]);
 
-  const charCount = useMemo(
-    () => [...editedText].length,
-    [editedText],
-  );
-  const overLimit = charCount > charLimit;
+  const threadsCharCount = useMemo(() => [...threadsText].length, [threadsText]);
+  const blueskyCharCount = useMemo(() => [...blueskyText].length, [blueskyText]);
+  const threadsOverLimit = threadsCharCount > SNS_LABELS.threads.charLimit;
+  const blueskyOverLimit = blueskyCharCount > SNS_LABELS.bluesky.charLimit;
 
-  const handleCopy = async (): Promise<void> => {
+  const handleCopy = async (text: string, label: string): Promise<void> => {
     try {
-      await navigator.clipboard.writeText(editedText);
-      setCopyStatus("コピーしました ✓");
+      await navigator.clipboard.writeText(text);
+      setCopyStatus(`${label} をコピーしました ✓`);
       setTimeout(() => setCopyStatus(""), 2500);
     } catch (e) {
       setCopyStatus(`コピー失敗: ${String(e)}`);
     }
   };
 
-  const handleCopyAndOpenNote = async (): Promise<void> => {
+  const handleCopyAndOpenNote = async (text: string): Promise<void> => {
     try {
       setError("");
-      await navigator.clipboard.writeText(editedText);
+      await navigator.clipboard.writeText(text);
       await invoke("open_note_compose");
       setCopyStatus("note を開きました、本文欄で Ctrl+V で貼り付け ✓");
       setTimeout(() => setCopyStatus(""), 5000);
@@ -290,8 +318,11 @@ export default function App(): JSX.Element {
     }
   };
 
-  const handleResetText = (): void => {
-    if (generated) setEditedText(generated.text);
+  const handleResetThreads = (): void => {
+    if (threadsGenerated) setThreadsText(threadsGenerated.text);
+  };
+  const handleResetBluesky = (): void => {
+    if (blueskyGenerated) setBlueskyText(blueskyGenerated.text);
   };
 
   const handleImagePick = async (): Promise<void> => {
@@ -385,107 +416,160 @@ export default function App(): JSX.Element {
     }
   };
 
-  const handlePublish = async (): Promise<void> => {
-    // Threads affiliate mode: put the URL in a self-reply per ADR-012.
-    const wantsReply =
-      sns === "threads" && mode === "affiliate" && product !== null;
-    const replyBody = wantsReply
-      ? `詳細はこちら👇\n${product!.affiliate_url}`
-      : undefined;
-
-    // Threads API does not accept direct binary image upload (it requires a
-    // publicly reachable URL). We send images only to Bluesky; for Threads the
-    // user adds them manually after posting.
-    const imagePaths = sns === "bluesky" ? images : [];
-
-    const snsLabel = SNS_LABELS[sns].short;
-    const previewLines = [
-      `${snsLabel} に投稿します。内容を確認してください。`,
-      "",
-      editedText,
-    ];
-    if (replyBody) {
-      previewLines.push("", "--- リプライ (アフィ URL) ---", replyBody);
+  const buildPromptsFor = (sns: SnsKind): { system: string; user: string } => {
+    const ngList = [...ngFlags];
+    if (mode === "preparation") {
+      return {
+        system: buildSystemPrompt(sns, "preparation", ngList, profile),
+        user: buildPreparationUserPrompt(soulTopic, prepMemo, sns),
+      };
     }
-    if (imagePaths.length > 0) {
-      previewLines.push("", `画像 ${imagePaths.length} 枚を添付`);
-    } else if (sns === "threads" && images.length > 0) {
-      previewLines.push(
-        "",
-        "⚠ Threads API は画像の直接アップロード非対応。投稿後に Threads アプリから追加してください。",
-      );
-    }
-    previewLines.push("", `${charCount} / ${charLimit} 字`);
-    const ok = window.confirm(previewLines.join("\n"));
-    if (!ok) return;
-
-    try {
-      setError("");
-      setPublishResult(null);
-      setPublishing(true);
-      const resp = await invoke<SidecarResponse<PublishData>>("publish_post", {
+    if (!product) throw new Error("本投稿モードでは、先に商品情報を取得してください。");
+    return {
+      system: buildSystemPrompt(sns, "affiliate", ngList, profile),
+      user: buildAffiliateUserPrompt({
+        productTitle: product.title,
+        productDescription: product.description,
+        productShop: product.shop_name,
+        productPriceYen: product.price_yen,
+        productAffiliateUrl: product.affiliate_url,
+        userInput: affMemo,
         sns,
-        body: editedText,
-        replyBody,
-        imagePaths,
-      });
-      if (resp.ok && resp.data) {
-        setPublishResult(resp.data);
-      } else {
-        setError(
-          `publish error: ${resp.error?.type}: ${resp.error?.message}`,
-        );
-      }
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setPublishing(false);
-    }
+      }),
+    };
+  };
+
+  const generateOne = async (sns: SnsKind): Promise<GenerateData | null> => {
+    const { system, user } = buildPromptsFor(sns);
+    const resp = await invoke<SidecarResponse<GenerateData>>("generate_post", {
+      systemPrompt: system,
+      userPrompt: user,
+    });
+    if (resp.ok && resp.data) return resp.data;
+    throw new Error(
+      `${SNS_LABELS[sns].short}: ${resp.error?.type}: ${resp.error?.message}`,
+    );
   };
 
   const handleGenerate = async (): Promise<void> => {
-    try {
-      setError("");
-      setGenerated(null);
-
-      let systemPrompt = "";
-      let userPrompt = "";
-      const ngList = [...ngFlags];
-      if (mode === "preparation") {
-        systemPrompt = buildSystemPrompt(sns, "preparation", ngList, profile);
-        userPrompt = buildPreparationUserPrompt(soulTopic, prepMemo, sns);
-      } else {
-        if (!product) {
-          setError("本投稿モードでは、先に商品情報を取得してください。");
-          return;
-        }
-        systemPrompt = buildSystemPrompt(sns, "affiliate", ngList, profile);
-        userPrompt = buildAffiliateUserPrompt({
-          productTitle: product.title,
-          productDescription: product.description,
-          productShop: product.shop_name,
-          productPriceYen: product.price_yen,
-          productAffiliateUrl: product.affiliate_url,
-          userInput: affMemo,
-          sns,
-        });
-      }
-
-      setGenerating(true);
-      const resp = await invoke<SidecarResponse<GenerateData>>(
-        "generate_post",
-        { systemPrompt, userPrompt },
-      );
-      if (resp.ok && resp.data) {
-        setGenerated(resp.data);
-      } else {
-        setError(`generate error: ${resp.error?.type}: ${resp.error?.message}`);
-      }
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setGenerating(false);
+    setError("");
+    if (mode === "affiliate" && !product) {
+      setError("本投稿モードでは、先に商品情報を取得してください。");
+      return;
     }
+    setThreadsGenerated(null);
+    setBlueskyGenerated(null);
+    setGenerating(true);
+    const [threadsResult, blueskyResult] = await Promise.allSettled([
+      generateOne("threads"),
+      generateOne("bluesky"),
+    ]);
+    if (threadsResult.status === "fulfilled" && threadsResult.value) {
+      setThreadsGenerated(threadsResult.value);
+    }
+    if (blueskyResult.status === "fulfilled" && blueskyResult.value) {
+      setBlueskyGenerated(blueskyResult.value);
+    }
+    const errors: string[] = [];
+    if (threadsResult.status === "rejected") {
+      errors.push(String(threadsResult.reason?.message ?? threadsResult.reason));
+    }
+    if (blueskyResult.status === "rejected") {
+      errors.push(String(blueskyResult.reason?.message ?? blueskyResult.reason));
+    }
+    if (errors.length > 0) {
+      setError("generate error: " + errors.join(" / "));
+    }
+    setGenerating(false);
+  };
+
+  const handlePublish = async (): Promise<void> => {
+    const hasThreads = threadsText.trim().length > 0;
+    const hasBluesky = blueskyText.trim().length > 0;
+    if (!hasThreads && !hasBluesky) return;
+
+    // Threads affiliate mode: put the URL in a self-reply per ADR-012.
+    const threadsReplyBody =
+      hasThreads && mode === "affiliate" && product !== null
+        ? `詳細はこちら👇\n${product.affiliate_url}`
+        : undefined;
+
+    const previewLines: string[] = ["両 SNS に投稿します。内容を確認してください。"];
+    if (hasThreads) {
+      previewLines.push("", "── 🧵 Threads ──", threadsText);
+      if (threadsReplyBody) {
+        previewLines.push("", "(リプ) " + threadsReplyBody);
+      }
+      previewLines.push(`(${threadsCharCount} / ${SNS_LABELS.threads.charLimit} 字)`);
+    }
+    if (hasBluesky) {
+      previewLines.push("", "── 🦋 Bluesky ──", blueskyText);
+      previewLines.push(`(${blueskyCharCount} / ${SNS_LABELS.bluesky.charLimit} 字)`);
+    }
+    if (images.length > 0) {
+      previewLines.push(
+        "",
+        `画像 ${images.length} 枚を Bluesky に添付 (Threads API は直接アップ不可、手動追加してください)`,
+      );
+    }
+    if (!window.confirm(previewLines.join("\n"))) return;
+
+    setError("");
+    setThreadsPublishResult(null);
+    setBlueskyPublishResult(null);
+    setPublishing(true);
+
+    const tasks: Promise<[SnsKind, PublishData | null, string | null]>[] = [];
+    if (hasThreads) {
+      tasks.push(
+        (async () => {
+          const resp = await invoke<SidecarResponse<PublishData>>("publish_post", {
+            sns: "threads",
+            body: threadsText,
+            replyBody: threadsReplyBody,
+            imagePaths: [],
+          });
+          return [
+            "threads",
+            resp.ok && resp.data ? resp.data : null,
+            resp.ok ? null : `${resp.error?.type}: ${resp.error?.message}`,
+          ];
+        })(),
+      );
+    }
+    if (hasBluesky) {
+      tasks.push(
+        (async () => {
+          const resp = await invoke<SidecarResponse<PublishData>>("publish_post", {
+            sns: "bluesky",
+            body: blueskyText,
+            imagePaths: images,
+          });
+          return [
+            "bluesky",
+            resp.ok && resp.data ? resp.data : null,
+            resp.ok ? null : `${resp.error?.type}: ${resp.error?.message}`,
+          ];
+        })(),
+      );
+    }
+
+    const results = await Promise.allSettled(tasks);
+    const errMsgs: string[] = [];
+    for (const r of results) {
+      if (r.status === "rejected") {
+        errMsgs.push(String(r.reason?.message ?? r.reason));
+        continue;
+      }
+      const [sns, data, errMsg] = r.value;
+      if (errMsg) errMsgs.push(`${SNS_LABELS[sns].short}: ${errMsg}`);
+      if (sns === "threads") setThreadsPublishResult(data);
+      else setBlueskyPublishResult(data);
+    }
+    if (errMsgs.length > 0) {
+      setError("publish error: " + errMsgs.join(" / "));
+    }
+    setPublishing(false);
   };
 
   return (
@@ -611,30 +695,6 @@ export default function App(): JSX.Element {
             </div>
           )}
         </details>
-      </section>
-
-      <section className="panel mode-panel">
-        <h2>投稿先 SNS</h2>
-        <div className="mode-toggle">
-          {(Object.keys(SNS_LABELS) as SnsKind[]).map((k) => (
-            <button
-              key={k}
-              type="button"
-              className={sns === k ? "mode-active" : "mode-inactive"}
-              onClick={() => setSns(k)}
-            >
-              {SNS_LABELS[k].label}
-              <span className="sns-meta">
-                {SNS_LABELS[k].charLimit}字 / {SNS_LABELS[k].tagLabel}
-              </span>
-            </button>
-          ))}
-        </div>
-        <p className="mode-hint">
-          {sns === "threads"
-            ? "Threads: 親ポスト URL NG、タグ 1 個、会話誘発の質問で締める。リプライに URL を配置。"
-            : "Bluesky: URL 本文 OK、タグ 2-4 個必須 (カスタムフィード拾い)、具体スペック入れると刺さる。"}
-        </p>
       </section>
 
       <section className="panel mode-panel">
@@ -819,7 +879,7 @@ export default function App(): JSX.Element {
       </section>
 
       <section className="panel generate-section">
-        <h2>文章生成 ({mode === "preparation" ? "準備期間" : "本投稿"}モード)</h2>
+        <h2>🪄 文章生成 ({mode === "preparation" ? "準備期間" : "本投稿"}モード)</h2>
         <div className="row">
           <button
             type="button"
@@ -827,104 +887,96 @@ export default function App(): JSX.Element {
             onClick={handleGenerate}
             disabled={generating || (mode === "affiliate" && !product)}
           >
-            {generating ? "生成中…" : "✨ 生成"}
+            {generating ? "生成中… (両 SNS 並行)" : "✨ 両 SNS 文章を生成"}
           </button>
           {mode === "affiliate" && !product && (
             <span className="hint-inline">先に商品情報を取得してください</span>
           )}
         </div>
-        {generated && (
-          <div className="output">
-            <div className="meta">
-              provider={generated.provider} · model={generated.model} ·
-              tokens in/out={generated.tokens_in}/{generated.tokens_out} ·
-              {generated.duration_ms}ms
-            </div>
-            <textarea
-              className="generated-edit"
-              rows={10}
-              value={editedText}
-              onChange={(e) => setEditedText(e.target.value)}
-              spellCheck={false}
-            />
-            <div className="row generated-toolbar">
-              <button type="button" onClick={handleCopy}>
-                📋 コピー
-              </button>
-              <button
-                type="button"
-                className="btn-note"
-                onClick={handleCopyAndOpenNote}
-                title="クリップボードにコピーしてから note 新規投稿ページを開きます"
-              >
-                📝 note にコピー & 開く
-              </button>
-              {(sns === "bluesky" || sns === "threads") && (
-                <button
-                  type="button"
-                  className="btn-primary"
-                  onClick={handlePublish}
-                  disabled={
-                    publishing ||
-                    !editedText.trim() ||
-                    overLimit ||
-                    (validation?.error_count ?? 0) > 0 ||
-                    (sns === "threads" && mode === "affiliate" && !product)
-                  }
-                  title={
-                    sns === "threads" && mode === "affiliate"
-                      ? "Threads に投稿 (本文 → 自動でアフィ URL をリプ投稿)"
-                      : `${SNS_LABELS[sns].short} に直接投稿します`
-                  }
-                >
-                  {publishing
-                    ? "投稿中…"
-                    : sns === "bluesky"
-                      ? "🦋 Bluesky に投稿"
-                      : "🧵 Threads に投稿"}
-                </button>
-              )}
-              <button type="button" onClick={handleResetText}>
-                ↺ 元に戻す
-              </button>
-              <span className={overLimit ? "char-count over" : "char-count"}>
-                {charCount} / {charLimit} 字
-                {overLimit && " — 超過！"}
-              </span>
-              {copyStatus && <span className="copy-status">{copyStatus}</span>}
-            </div>
-            {publishResult && publishResult.success && (
-              <div className="output publish-success">
-                <span className="val-check">✓</span> 投稿成功！
-                {publishResult.sns_post_url && (
-                  <>
-                    {" "}
-                    <button
-                      type="button"
-                      className="link-button"
-                      onClick={async () => {
-                        try {
-                          await openUrl(publishResult.sns_post_url!);
-                        } catch (e) {
-                          setError(`ブラウザを開けません: ${String(e)}`);
-                        }
-                      }}
-                    >
-                      投稿を開く
-                    </button>
-                  </>
-                )}
-              </div>
-            )}
-            {validation && <ValidationPanel validation={validation} />}
-            <div className="post-hint">
-              {mode === "affiliate"
-                ? "⚠ 親ポストに URL が混入していないか確認。投稿後 15 分以内に自己リプ返信しよう。"
-                : "⚠ 商品名や URL が混入していないか確認 (準備期間は信用貯金フェーズ)。"}
-            </div>
-          </div>
-        )}
+        <p className="mode-hint">
+          Threads は親 URL NG / タグ 1 / 500 字。Bluesky は URL 本文 OK /
+          タグ 2-4 / 300 字。それぞれ別文章が生成されます。
+        </p>
       </section>
+
+      {threadsGenerated && (
+        <DraftPanel
+          sns="threads"
+          generated={threadsGenerated}
+          text={threadsText}
+          setText={setThreadsText}
+          charCount={threadsCharCount}
+          overLimit={threadsOverLimit}
+          validation={threadsValidation}
+          onCopy={() => handleCopy(threadsText, "Threads 本文")}
+          onCopyToNote={() => handleCopyAndOpenNote(threadsText)}
+          onReset={handleResetThreads}
+          mode={mode}
+        />
+      )}
+
+      {blueskyGenerated && (
+        <DraftPanel
+          sns="bluesky"
+          generated={blueskyGenerated}
+          text={blueskyText}
+          setText={setBlueskyText}
+          charCount={blueskyCharCount}
+          overLimit={blueskyOverLimit}
+          validation={blueskyValidation}
+          onCopy={() => handleCopy(blueskyText, "Bluesky 本文")}
+          onReset={handleResetBluesky}
+          mode={mode}
+        />
+      )}
+
+      {(threadsGenerated || blueskyGenerated) && (
+        <section className="panel publish-section">
+          <h2>🚀 投稿</h2>
+          {copyStatus && (
+            <div className="row">
+              <span className="copy-status">{copyStatus}</span>
+            </div>
+          )}
+          <div className="row">
+            <button
+              type="button"
+              className="btn-primary"
+              onClick={handlePublish}
+              disabled={
+                publishing ||
+                (!threadsText.trim() && !blueskyText.trim()) ||
+                threadsOverLimit ||
+                blueskyOverLimit ||
+                (threadsValidation?.error_count ?? 0) > 0 ||
+                (blueskyValidation?.error_count ?? 0) > 0
+              }
+              title="Threads と Bluesky に同時投稿 (画像は Bluesky のみ)"
+            >
+              {publishing ? "投稿中… (両 SNS)" : "🚀 両方に投稿"}
+            </button>
+          </div>
+          {threadsPublishResult && (
+            <PublishResult
+              label="🧵 Threads"
+              result={threadsPublishResult}
+              onError={setError}
+            />
+          )}
+          {blueskyPublishResult && (
+            <PublishResult
+              label="🦋 Bluesky"
+              result={blueskyPublishResult}
+              onError={setError}
+            />
+          )}
+          <div className="post-hint">
+            {mode === "affiliate"
+              ? "⚠ 親ポストに URL が混入していないか確認。投稿後 15 分以内に自己リプ返信しよう。"
+              : "⚠ 商品名や URL が混入していないか確認 (準備期間は信用貯金フェーズ)。"}
+          </div>
+        </section>
+      )}
 
       {error && (
         <section className="panel error-panel">
@@ -976,16 +1028,119 @@ export default function App(): JSX.Element {
   );
 }
 
+function DraftPanel(props: {
+  sns: SnsKind;
+  generated: GenerateData;
+  text: string;
+  setText: (s: string) => void;
+  charCount: number;
+  overLimit: boolean;
+  validation: ValidationData | null;
+  onCopy: () => void | Promise<void>;
+  onCopyToNote?: () => void | Promise<void>;
+  onReset: () => void;
+  mode: PostMode;
+}): JSX.Element {
+  const label = SNS_LABELS[props.sns];
+  const charLimit = label.charLimit;
+  return (
+    <section className={`panel draft-panel draft-${props.sns}`}>
+      <h2>
+        {label.label} 下書き ({charLimit} 字 / {label.tagLabel})
+      </h2>
+      <div className="meta">
+        provider={props.generated.provider} · model={props.generated.model} ·
+        tokens in/out={props.generated.tokens_in}/{props.generated.tokens_out}
+        {" · "}
+        {props.generated.duration_ms}ms
+      </div>
+      <textarea
+        className="generated-edit"
+        rows={props.sns === "threads" ? 12 : 8}
+        value={props.text}
+        onChange={(e) => props.setText(e.target.value)}
+        spellCheck={false}
+      />
+      <div className="row generated-toolbar">
+        <button type="button" onClick={() => void props.onCopy()}>
+          📋 コピー
+        </button>
+        {props.onCopyToNote && (
+          <button
+            type="button"
+            className="btn-note"
+            onClick={() => void props.onCopyToNote!()}
+            title="クリップボードにコピーしてから note 新規投稿ページを開きます"
+          >
+            📝 note にコピー & 開く
+          </button>
+        )}
+        <button type="button" onClick={props.onReset}>
+          ↺ 元に戻す
+        </button>
+        <span className={props.overLimit ? "char-count over" : "char-count"}>
+          {props.charCount} / {charLimit} 字
+          {props.overLimit && " — 超過！"}
+        </span>
+      </div>
+      {props.validation && (
+        <ValidationPanel sns={props.sns} validation={props.validation} />
+      )}
+    </section>
+  );
+}
+
+function PublishResult(props: {
+  label: string;
+  result: PublishData;
+  onError: (msg: string) => void;
+}): JSX.Element {
+  if (!props.result.success) {
+    return (
+      <div className="output publish-error">
+        ⛔ {props.label} 投稿失敗: {props.result.error_type}:{" "}
+        {props.result.error_message}
+      </div>
+    );
+  }
+  return (
+    <div className="output publish-success">
+      <span className="val-check">✓</span> {props.label} 投稿成功！
+      {props.result.sns_post_url && (
+        <>
+          {" "}
+          <button
+            type="button"
+            className="link-button"
+            onClick={async () => {
+              try {
+                await openUrl(props.result.sns_post_url!);
+              } catch (e) {
+                props.onError(`ブラウザを開けません: ${String(e)}`);
+              }
+            }}
+          >
+            投稿を開く
+          </button>
+        </>
+      )}
+    </div>
+  );
+}
+
 function ValidationPanel({
+  sns,
   validation,
 }: {
+  sns: SnsKind;
   validation: ValidationData;
 }): JSX.Element {
   const { issues, error_count, warning_count } = validation;
   if (issues.length === 0) {
     return (
       <div className="validation-panel validation-ok">
-        <span className="val-check">✓</span> Threads ルールチェック通過
+        <span className="val-check">✓</span> {SNS_LABELS[sns].short}{" "}
+        ルールチェック通過
       </div>
     );
   }
