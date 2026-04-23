@@ -1,6 +1,6 @@
 [package]
 name = "aya-afi"
-version = "0.1.0"
+version = "0.1.2"
 description = "SNS affiliate posting assistant (Tauri shell)"
 authors = ["kyohei"]
 edition = "2021"
@@ -26,6 +26,7 @@ tauri-plugin-dialog = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 native-dialog = "0.9.4"
+tauri-plugin-store = "2.0.0-rc.4"
 
 [features]
 default = ["custom-protocol"]

@@ -4,6 +4,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { check as checkForUpdate } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
+import { storeGet, storeSet } from "./settings-store";
 
 function pathToWebviewSrc(path: string): string {
   return convertFileSrc(path);
@@ -125,6 +126,7 @@ function saveProfile(value: string): void {
   } catch {
     // localStorage full — non-fatal
   }
+  void storeSet(PROFILE_STORAGE_KEY, value);
 }
 
 function loadNGFlags(): Set<NGFlagId> {
@@ -151,6 +153,7 @@ function saveNGFlags(flags: Set<NGFlagId>): void {
   } catch {
     // localStorage quota / private mode — silently ignore
   }
+  void storeSet(NG_STORAGE_KEY, [...flags]);
 }
 
 type SidecarResponse<T> = {
@@ -334,6 +337,48 @@ export default function App(): JSX.Element {
         await relaunch();
       } catch {
         // Dev builds have no signed endpoint — this throwing is expected.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // On first mount, also pull profile + NG from the persistent Tauri Store
+  // (file-based, shared across dev/install/upgrade). If the store holds a
+  // value that the warm localStorage cache missed, upgrade React state so
+  // aya's settings survive reinstalls and origin changes.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const [storedProfile, storedNg] = await Promise.all([
+          storeGet<string>(PROFILE_STORAGE_KEY),
+          storeGet<NGFlagId[]>(NG_STORAGE_KEY),
+        ]);
+        if (cancelled) return;
+        if (typeof storedProfile === "string" && storedProfile.length > 0) {
+          setProfileState(storedProfile);
+          try {
+            localStorage.setItem(PROFILE_STORAGE_KEY, storedProfile);
+          } catch {
+            /* non-fatal */
+          }
+        }
+        if (Array.isArray(storedNg)) {
+          const valid = storedNg.filter(
+            (v): v is NGFlagId =>
+              typeof v === "string" && Object.hasOwn(NG_OPTIONS, v),
+          );
+          setNgFlagsState(new Set(valid));
+          try {
+            localStorage.setItem(NG_STORAGE_KEY, JSON.stringify(valid));
+          } catch {
+            /* non-fatal */
+          }
+        }
+      } catch {
+        /* store plugin unavailable in dev */
       }
     })();
     return () => {
