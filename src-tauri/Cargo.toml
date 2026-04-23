@@ -1,6 +1,6 @@
 [package]
 name = "aya-afi"
-version = "0.1.3"
+version = "0.1.4"
 description = "SNS affiliate posting assistant (Tauri shell)"
 authors = ["kyohei"]
 edition = "2021"
